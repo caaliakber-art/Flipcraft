@@ -251,6 +251,7 @@ class TrackEvent(BaseModel):
     finished: bool = False
     tz: str = Field("", max_length=64)
     seconds: float = Field(0, ge=0, le=120)
+    channel: str = Field("", max_length=20)
 
 
 class LeadIn(BaseModel):
@@ -442,6 +443,7 @@ async def track(fid: str, body: TrackEvent, authorization: Optional[str] = Heade
         region = region_of(body.tz)
         if region:
             inc[f"regions.{region}"] = 1
+        inc[f"channels.{body.channel if body.channel in CHANNELS else 'direct'}"] = 1
         try:
             res = await db.visitors.update_one({"flipbook_id": fid, "visitor": body.visitor}, {"$setOnInsert": {"at": now_iso()}}, upsert=True)
             if res.upserted_id:
@@ -458,6 +460,10 @@ async def track(fid: str, body: TrackEvent, authorization: Optional[str] = Heade
     if inc:
         await db.stats.update_one({"flipbook_id": fid}, {"$inc": inc}, upsert=True)
     return {"ok": True}
+
+
+# Where a reader came from: the share button they followed, or the page that linked here.
+CHANNELS = {"linkedin", "whatsapp", "email", "copy", "share", "website", "search", "x", "facebook", "direct", "other"}
 
 
 # Readers' country from the browser time zone: no IP lookup, nothing personal stored.
@@ -587,12 +593,19 @@ def clean_title(t: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[_]+", " ", t)).strip()[:150]
 
 
+class Deadline(BaseModel):
+    date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    title: str = Field(min_length=1, max_length=200)
+    page: Optional[int] = Field(None, ge=0, le=5000)
+
+
 class LibraryItem(BaseModel):
     flipbook_id: str = Field(max_length=40)
     label: str = Field("", max_length=120)
     date: str = Field("", pattern=r"^(\d{4}-\d{2})?$")
     special: bool = False
     kind: str = Field("", max_length=60)
+    deadlines: List[Deadline] = Field(default_factory=list, max_length=30)
 
 
 class LibraryIn(BaseModel):
@@ -737,6 +750,7 @@ async def library_stats(lid: str, ohash: str = Depends(require_owner)):
     span = [(today - timedelta(days=i)).isoformat() for i in range(29, -1, -1)]
     days = {d: 0 for d in span}
     regions: Dict[str, int] = {}
+    channels: Dict[str, int] = {}
     rows, people = [], set()
     for fid in ids:
         s, rs = stats.get(fid, {}), readers.get(fid, [])
@@ -744,6 +758,8 @@ async def library_stats(lid: str, ohash: str = Depends(require_owner)):
             days[d] += s.get("days", {}).get(d, 0)
         for k, n in s.get("regions", {}).items():
             regions[k] = regions.get(k, 0) + n
+        for k, n in s.get("channels", {}).items():
+            channels[k] = channels.get(k, 0) + n
         people.update(r["visitor"] for r in rs)
         pages = s.get("pages", {})
         top = sorted(((int(k), n) for k, n in pages.items()), key=lambda x: -x[1])[:3]
@@ -766,6 +782,7 @@ async def library_stats(lid: str, ohash: str = Depends(require_owner)):
         "avg_seconds": round(sum(r.get("seconds", 0) for r in all_readers) / len(all_readers)) if all_readers else 0,
         "days": [{"date": d, "views": days[d]} for d in span],
         "regions": sorted(({"name": k, "views": n} for k, n in regions.items()), key=lambda r: -r["views"]),
+        "channels": sorted(({"name": k, "views": n} for k, n in channels.items()), key=lambda r: -r["views"]),
         "items": rows,
         "subscribers": await db.subscribers.count_documents({"library_id": lid}),
         "useful": sum(useful.values()),
@@ -797,42 +814,223 @@ async def mark_useful(slug: str, body: UsefulIn):
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://flipcraft.onrender.com").rstrip("/")
 
 
+def public_base(request: Request) -> str:
+    base = str(request.base_url).rstrip("/")
+    if request.headers.get("x-forwarded-proto") == "https":
+        base = base.replace("http://", "https://", 1)
+    return base
+
+
+def flat_heads(toc: list) -> list:
+    """Contents-page headlines in reading order; their index is the 'h' in share links."""
+    return [{"title": h["title"], "section": s["section"], "page": h.get("page")} for s in (toc or []) for h in s.get("items", [])]
+
+
+def issue_name(it: dict) -> str:
+    return f"{it['kind']}, {it['label']}" if it.get("special") and it.get("date") else it.get("label", "")
+
+
 @api.get("/share/{slug}")
-async def share_page(slug: str, request: Request, issue: str = "", page: int = 0):
-    import html as h
+async def share_page(slug: str, request: Request, issue: str = "", page: int = 0, h: int = -1, via: str = ""):
+    import html as hx
+    from urllib.parse import urlencode
     lib = await db.libraries.find_one({"slug": slug, "is_deleted": False}, {"_id": 0})
     if not lib:
         raise HTTPException(status_code=404, detail="Library not found")
     view = await library_view(lib, public=True)
     brand = view["brand"].get("name") or ""
-    it = next((i for i in view["items"] if i["flipbook_id"] == issue), None) or (view["items"][0] if view["items"] else None)
-    target = f"{FRONTEND_URL}/library/{slug}"
+    short = "".join(w[0] for w in re.findall(r"[A-Z][a-z]*", brand.replace("LLP", "")))[:4]
+    it = next((i for i in view["items"] if i["flipbook_id"] == issue), None)
+    q = {}
     title = f"{view['title']}" + (f" | {brand}" if brand else "")
     desc = view.get("pitch_text") or view.get("subtitle") or f"Every issue of {view['title']}, searchable in one place."
-    image = ""
-    if issue and it:
-        target += f"?issue={it['flipbook_id']}" + (f"&page={page}" if page > 1 else "")
-        name = f"{it['kind']}, {it['label']}" if it.get("special") and it.get("date") else it["label"]
+    if it:
+        q["issue"] = it["flipbook_id"]
+        name = issue_name(it)
         title = f"{view['title']}: {name}" + (f" | {brand}" if brand else "")
         heads = [s["section"] for s in (it.get("toc") or [])][:5]
         if heads:
             desc = "In this issue: " + ", ".join(heads) + "."
-    if it and it.get("cover"):
-        image = str(request.base_url).rstrip("/") + "/api/files/" + it["cover"]
-        if request.headers.get("x-forwarded-proto") == "https":
-            image = image.replace("http://", "https://", 1)
-    e = lambda v: h.escape(v, quote=True)
+        fh = flat_heads(it.get("toc"))
+        if 0 <= h < len(fh):
+            head = fh[h]
+            q["h"] = str(h)
+            if head["page"] is not None:
+                page = head["page"] + 1
+            title = f"{head['title']} | {short or brand} {view['title']}".strip()
+            desc = f"{head['section']}, from {view['title']} {name}. Read the update, then the full issue."
+        if page > 1:
+            q["page"] = str(page)
+    if via in CHANNELS:
+        q["via"] = via
+    target = f"{FRONTEND_URL}/library/{slug}" + (f"?{urlencode(q)}" if q else "")
+    img_q = {k: v for k, v in q.items() if k in ("issue", "h")}
+    image = f"{public_base(request)}/api/og/{slug}.png" + (f"?{urlencode(img_q)}" if img_q else "")
+    e = lambda v: hx.escape(v, quote=True)
     body = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <title>{e(title)}</title>
 <meta name="description" content="{e(desc)}">
-<meta property="og:type" content="article"><meta property="og:title" content="{e(title)}">
+<meta property="og:type" content="article"><meta property="og:site_name" content="{e(brand or view['title'])}">
+<meta property="og:title" content="{e(title)}">
 <meta property="og:description" content="{e(desc)}"><meta property="og:url" content="{e(target)}">
-{f'<meta property="og:image" content="{e(image)}">' if image else ''}
-<meta name="twitter:card" content="summary_large_image">
+<meta property="og:image" content="{e(image)}"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="627">
+<meta name="twitter:card" content="summary_large_image"><meta name="twitter:image" content="{e(image)}">
 <meta http-equiv="refresh" content="0;url={e(target)}">
 </head><body><p><a href="{e(target)}">Open {e(view['title'])}</a></p>
 <script>location.replace({json.dumps(target)})</script></body></html>"""
     return HTMLResponse(body)
+
+
+# A branded 1200x627 card for LinkedIn/WhatsApp previews: the headline (or the
+# issue's month), the sections inside, the logo, and the cover on the right.
+og_cache: Dict[str, bytes] = {}
+FONT_DIR = ROOT_DIR / "fonts"
+
+
+async def cached_local(path: str) -> Optional[Path]:
+    if not path:
+        return None
+    local = CACHE_DIR / hashlib.sha1(path.encode()).hexdigest()
+    if not local.exists():
+        try:
+            await asyncio.to_thread(download_to, path, local)
+        except Exception:
+            return None
+    return local
+
+
+def render_og(brand: dict, lib_title: str, pitch: str, kicker: str, headline: str, sub: str, cover: Optional[Path], logo: Optional[Path]) -> bytes:
+    from PIL import Image, ImageDraw, ImageFont, ImageFilter
+    import io
+    W, H = 1200, 627
+    hexv = (brand.get("color") or "#204262").lstrip("#")
+    try:
+        navy = tuple(int(hexv[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        navy = (32, 66, 98)
+    ink = (10, 22, 38)
+    img = Image.new("RGB", (W, H), ink)
+    grad = Image.linear_gradient("L").rotate(90).resize((W, H))  # dark left -> brand right
+    img = Image.composite(Image.new("RGB", (W, H), navy), img, grad.point(lambda v: int(v * 0.85)))
+    d = ImageDraw.Draw(img)
+    f = lambda name, size: ImageFont.truetype(str(FONT_DIR / f"Roboto-{name}.ttf"), size)
+    mist = (157, 184, 212)
+    # cover on the right, slightly lifted
+    text_right = W - 72
+    if cover and cover.exists():
+        try:
+            c = Image.open(cover).convert("RGB")
+            ch = 500
+            cw = int(c.width * ch / c.height)
+            c = c.resize((cw, ch), Image.LANCZOS)
+            x, y = W - cw - 64, (H - ch) // 2
+            shadow = Image.new("L", (cw + 80, ch + 80), 0)
+            ImageDraw.Draw(shadow).rectangle((40, 50, cw + 40, ch + 40), fill=150)
+            shadow = shadow.filter(ImageFilter.GaussianBlur(22))
+            img.paste((0, 0, 0), (x - 40, y - 40), shadow)
+            img.paste(c, (x, y))
+            text_right = x - 56
+        except Exception:
+            pass
+    left = 72
+    # brand barcode, as on the slides
+    for i in range(9):
+        hgt = [26, 18, 22, 34, 22, 18, 26, 14, 20][i]
+        d.rectangle((left + i * 7, 86 - hgt, left + i * 7 + 2, 86), fill=(255, 255, 255))
+    d.text((left + 82, 62), kicker.upper(), font=f("Medium", 20), fill=mist, spacing=4)
+
+    def wrap(text, font, width, lines):
+        words, out, cur = text.split(), [], ""
+        for w in words:
+            t = (cur + " " + w).strip()
+            if d.textlength(t, font=font) <= width:
+                cur = t
+            else:
+                out.append(cur)
+                cur = w
+                if len(out) == lines:
+                    break
+        if len(out) < lines and cur:
+            out.append(cur)
+        if len(out) == lines and " ".join(out) != text:
+            while d.textlength(out[-1] + "...", font=font) > width and " " in out[-1]:
+                out[-1] = out[-1].rsplit(" ", 1)[0]
+            out[-1] += "..."
+        return out
+
+    width = text_right - left
+    size = 58 if len(headline) < 70 else 48
+    hf = f("Light", size)
+    y = 150
+    for line in wrap(headline, hf, width, 4):
+        d.text((left, y), line, font=hf, fill=(255, 255, 255))
+        y += int(size * 1.18)
+    if sub:
+        y += 18
+        for line in wrap(sub, f("Regular", 26), width, 2):
+            d.text((left, y), line, font=f("Regular", 26), fill=(205, 218, 232))
+            y += 36
+    # footer: logo + pitch line
+    fy = H - 86
+    if logo and logo.exists():
+        try:
+            lg = Image.open(logo).convert("RGBA")
+            white = Image.new("RGBA", lg.size, (255, 255, 255, 255))
+            white.putalpha(lg.getchannel("A"))
+            white.thumbnail((210, 52), Image.LANCZOS)
+            img.paste(white, (left, fy), white)
+            if pitch:
+                d.text((left + white.width + 28, fy + (white.height - 24) // 2), pitch, font=f("Regular", 22), fill=mist)
+        except Exception:
+            pass
+    elif pitch:
+        d.text((left, fy), pitch, font=f("Regular", 22), fill=mist)
+    out = io.BytesIO()
+    img.save(out, "PNG", optimize=True)
+    return out.getvalue()
+
+
+@api.get("/og/{slug}.png")
+async def og_card(slug: str, issue: str = "", h: int = -1):
+    lib = await db.libraries.find_one({"slug": slug, "is_deleted": False}, {"_id": 0})
+    if not lib:
+        raise HTTPException(status_code=404, detail="Library not found")
+    view = await library_view(lib, public=True)
+    brand = view["brand"]
+    it = next((i for i in view["items"] if i["flipbook_id"] == issue), None) or next((i for i in view["items"] if not i.get("special")), None)
+    key = f"{slug}:{issue}:{it and it['flipbook_id']}:{h}:{view.get('pitch_title')}:{brand.get('logo')}:{brand.get('color')}"
+    if key not in og_cache:
+        kicker, headline, sub = view["title"], view["title"], view.get("pitch_text") or ""
+        if it:
+            kicker = f"{view['title']}  |  {issue_name(it)}"
+            fh = flat_heads(it.get("toc"))
+            if issue and 0 <= h < len(fh):
+                headline, sub = fh[h]["title"], fh[h]["section"]
+            elif issue:
+                headline = issue_name(it)
+                sub = "In this issue: " + ", ".join(s["section"] for s in (it.get("toc") or [])[:4]) if it.get("toc") else ""
+            else:
+                kicker, headline = view["title"], view.get("pitch_title") or view["title"]
+        cover = await cached_local(it["cover"]) if it else None
+        logo = await cached_local(brand.get("logo") or "")
+        og_cache[key] = await asyncio.to_thread(render_og, brand, view["title"], view.get("pitch_title") or "", kicker, headline, sub, cover, logo)
+        if len(og_cache) > 300:
+            og_cache.pop(next(iter(og_cache)))
+    return Response(og_cache[key], media_type="image/png", headers={"Cache-Control": "public, max-age=3600"})
+
+
+# ---------------------------------------------------------------- dates to act on
+@api.get("/libraries/{lid}/items/{fid}/deadline-suggestions")
+async def deadline_suggestions(lid: str, fid: str, ohash: str = Depends(require_owner)):
+    from deadlines import suggest
+    lib = await owned_library(lid, ohash)
+    item = next((i for i in lib.get("items", []) if i["flipbook_id"] == fid), None)
+    if not item:
+        raise HTTPException(status_code=404, detail="Issue not found in this library")
+    fb = await owned_flipbook(fid, ohash)
+    texts = {t["page"]: t.get("text", "") async for t in db.pagetext.find({"flipbook_id": fid}, {"_id": 0, "page": 1, "text": 1})}
+    pages = [texts.get(i, "") for i in range(fb.get("page_count", 0))]
+    return await asyncio.to_thread(suggest, pages, item.get("date") or "", fb.get("toc", []))
 
 
 # ---------------------------------------------------------------- add to home screen
@@ -914,6 +1112,152 @@ async def library_manifest(slug: str, request: Request):
     return JSONResponse(manifest, media_type="application/manifest+json")
 
 
+# ---------------------------------------------------------------- calendar files and the issue email
+@api.get("/ics/{slug}/{fid}.ics")
+async def issue_ics(slug: str, fid: str, i: int = -1):
+    from mailer import ics
+    lib = await db.libraries.find_one({"slug": slug, "is_deleted": False}, {"_id": 0})
+    item = next((x for x in (lib or {}).get("items", []) if x["flipbook_id"] == fid), None)
+    if not item or not item.get("deadlines"):
+        raise HTTPException(status_code=404, detail="No dates for this issue")
+    ds = sorted(item["deadlines"], key=lambda d: d["date"])
+    if i >= 0:
+        ds = ds[i:i + 1]
+    link = f"{FRONTEND_URL}/library/{slug}?issue={fid}"
+    events = [{**d, "note": f"From {lib['title']} {item.get('label', '')}: {link}"} for d in ds]
+    body = ics(events, prodid=f"FlipCraft {lib['title']}", url=link)
+    return Response(body, media_type="text/calendar; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{slugify(lib["title"])}-dates.ics"'})
+
+
+@api.get("/logo/{slug}/white.png")
+async def white_logo(slug: str):
+    """The brand logo in white on transparent, for dark email headers."""
+    from PIL import Image
+    import io
+    lib = await db.libraries.find_one({"slug": slug, "is_deleted": False}, {"_id": 0, "owner_hash": 1})
+    brand = (await get_brand(lib["owner_hash"]) or {}) if lib else {}
+    local = await cached_local(brand.get("logo") or "")
+    if not local:
+        raise HTTPException(status_code=404, detail="No logo")
+    def make():
+        lg = Image.open(local).convert("RGBA")
+        white = Image.new("RGBA", lg.size, (255, 255, 255, 255))
+        white.putalpha(lg.getchannel("A"))
+        white.thumbnail((480, 120), Image.LANCZOS)
+        out = io.BytesIO()
+        white.save(out, "PNG", optimize=True)
+        return out.getvalue()
+    return Response(await asyncio.to_thread(make), media_type="image/png", headers={"Cache-Control": "public, max-age=86400"})
+
+
+BREVO_KEY = os.environ.get("BREVO_API_KEY", "")
+EMAIL_FROM = os.environ.get("EMAIL_FROM", "")
+EMAIL_FROM_NAME = os.environ.get("EMAIL_FROM_NAME", "")
+
+
+def unsub_token(sid: str) -> str:
+    import hmac
+    return hmac.new((JWT_SECRET or "x").encode(), f"unsub:{sid}".encode(), hashlib.sha256).hexdigest()[:24]
+
+
+async def build_issue_email(lib: dict, fid: str, request: Request):
+    from mailer import compose
+    view = await library_view(lib, public=True)
+    item = next((i for i in view["items"] if i["flipbook_id"] == fid), None)
+    if not item:
+        raise HTTPException(status_code=404, detail="Issue not found in this library (is it still processing?)")
+    raw = next((i for i in lib.get("items", []) if i["flipbook_id"] == fid), {})
+    item = {**item, "deadlines": raw.get("deadlines", [])}
+    base = public_base(request)
+    slug = lib["slug"]
+    share = f"{base}/api/share/{slug}?issue={fid}&via=email"
+    links = {
+        "issue": share,
+        "head": lambda i: f"{share}&h={i}",
+        "ics": lambda i: f"{base}/api/ics/{slug}/{fid}.ics?i={i}",
+        "ics_all": f"{base}/api/ics/{slug}/{fid}.ics",
+        "logo": f"{base}/api/logo/{slug}/white.png" if view["brand"].get("logo") else "",
+        "site": view["brand"].get("website") or "",
+    }
+    return view, item, links
+
+
+class EmailSend(BaseModel):
+    flipbook_id: str = Field(max_length=40)
+    test_to: Optional[str] = Field(None, max_length=200)
+    resend: bool = False
+
+
+@api.get("/libraries/{lid}/email/preview")
+async def email_preview(lid: str, flipbook_id: str, request: Request, ohash: str = Depends(require_owner)):
+    from mailer import compose
+    lib = await owned_library(lid, ohash)
+    view, item, links = await build_issue_email(lib, flipbook_id, request)
+    subject, body, _ = compose(lib=view, item=item, heads=flat_heads(item.get("toc")), links=links, unsub="#")
+    count = await db.subscribers.count_documents({"library_id": lid, "status": {"$ne": "unsubscribed"}})
+    last = await db.campaigns.find_one({"library_id": lid, "flipbook_id": flipbook_id}, {"_id": 0}, sort=[("sent_at", -1)])
+    return {"subject": subject, "html": body, "recipients": count, "configured": bool(BREVO_KEY and EMAIL_FROM),
+            "from": f"{EMAIL_FROM_NAME or view['brand'].get('name') or ''} <{EMAIL_FROM}>" if EMAIL_FROM else "", "last_sent": last}
+
+
+@api.post("/libraries/{lid}/email/send")
+async def email_send(lid: str, body: EmailSend, request: Request, ohash: str = Depends(require_owner)):
+    import httpx
+    from mailer import compose
+    if not (BREVO_KEY and EMAIL_FROM):
+        raise HTTPException(status_code=400, detail="Email isn't connected yet. Add BREVO_API_KEY and EMAIL_FROM to the server settings.")
+    lib = await owned_library(lid, ohash)
+    view, item, links = await build_issue_email(lib, body.flipbook_id, request)
+    base = public_base(request)
+    if body.test_to:
+        email = body.test_to.strip().lower()
+        if not EMAIL_RE.match(email):
+            raise HTTPException(status_code=400, detail="Please enter a valid email address")
+        people = [{"email": email, "name": "", "id": ""}]
+    else:
+        if not body.resend and await db.campaigns.find_one({"library_id": lid, "flipbook_id": body.flipbook_id, "test": False}, {"_id": 1}):
+            raise HTTPException(status_code=409, detail="This issue has already been emailed to subscribers.")
+        people = [s async for s in db.subscribers.find({"library_id": lid, "status": {"$ne": "unsubscribed"}}, {"_id": 0, "email": 1, "name": 1, "id": 1})]
+        if not people:
+            raise HTTPException(status_code=400, detail="There are no subscribers yet.")
+    subject, html_body, text_body = compose(lib=view, item=item, heads=flat_heads(item.get("toc")), links=links, unsub="{{params.unsub}}")
+    sender = {"email": EMAIL_FROM, "name": EMAIL_FROM_NAME or view["brand"].get("name") or view["title"]}
+    sent, failed = 0, []
+    async with httpx.AsyncClient(timeout=30) as client:
+        for i in range(0, len(people), 90):
+            chunk = people[i:i + 90]
+            versions = []
+            for p in chunk:
+                unsub = f"{base}/api/unsubscribe/{p['id']}/{unsub_token(p['id'])}" if p["id"] else f"{FRONTEND_URL}/library/{lib['slug']}"
+                versions.append({"to": [{"email": p["email"], **({"name": p["name"]} if p.get("name") else {})}], "params": {"unsub": unsub},
+                                 "headers": {"List-Unsubscribe": f"<{unsub}>"}})
+            r = await client.post("https://api.brevo.com/v3/smtp/email", headers={"api-key": BREVO_KEY, "accept": "application/json"},
+                                  json={"sender": sender, "subject": subject, "htmlContent": html_body, "textContent": text_body, "messageVersions": versions})
+            if r.status_code >= 300:
+                failed.append(r.text[:300])
+                logger.warning("Brevo send failed: %s", r.text[:300])
+            else:
+                sent += len(chunk)
+    if not sent:
+        raise HTTPException(status_code=502, detail="The email service refused the message: " + (failed[0] if failed else "unknown error"))
+    await db.campaigns.insert_one({"library_id": lid, "flipbook_id": body.flipbook_id, "sent_at": now_iso(), "count": sent, "test": bool(body.test_to)})
+    return {"ok": True, "sent": sent, "failed": len(failed)}
+
+
+@api.get("/unsubscribe/{sid}/{token}")
+async def unsubscribe(sid: str, token: str):
+    import hmac
+    ok = hmac.compare_digest(token, unsub_token(sid))
+    sub = await db.subscribers.find_one({"id": sid}, {"_id": 0, "library_id": 1}) if ok else None
+    if sub:
+        await db.subscribers.update_one({"id": sid}, {"$set": {"status": "unsubscribed", "updated_at": now_iso()}})
+    msg = "You've been unsubscribed. You won't receive these emails any more." if sub else "This unsubscribe link isn't valid."
+    return HTMLResponse(f"""<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Unsubscribe</title>
+<body style="margin:0;font-family:Roboto,Segoe UI,Arial,sans-serif;background:#0a1626;color:#fff;display:grid;place-items:center;min-height:100vh;text-align:center;padding:24px">
+<div><h1 style="font-weight:300;font-size:28px;margin:0 0 10px">{'Done' if sub else 'Sorry'}</h1><p style="color:#9db8d4;font-size:16px;max-width:420px">{msg}</p></div></body>""")
+
+
 # ---------------------------------------------------------------- subscribers (leads)
 class SubscribeIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
@@ -949,11 +1293,17 @@ async def subscribe(slug: str, body: SubscribeIn, request: Request):
         raise HTTPException(status_code=400, detail="Please enter a valid email address")
     # A repeat sign-up only adds to what we know; it never blanks earlier answers.
     doc = {"name": body.name.strip(), "updated_at": now_iso()}
+    prev = await db.subscribers.find_one({"library_id": lib["id"], "email": email}, {"_id": 0, "status": 1})
+    if prev and prev.get("status") == "unsubscribed":
+        doc["status"] = "new"
     for k in ("organisation", "phone", "message", "issue"):
         v = getattr(body, k).strip()
         if v:
             doc[k] = v
-    upd = {"$set": doc, "$setOnInsert": {"id": uuid.uuid4().hex[:12], "owner_hash": lib["owner_hash"], "status": "new", "created_at": now_iso()}}
+    insert = {"id": uuid.uuid4().hex[:12], "owner_hash": lib["owner_hash"], "created_at": now_iso()}
+    if "status" not in doc:
+        insert["status"] = "new"
+    upd = {"$set": doc, "$setOnInsert": insert}
     if body.wants_credentials:
         doc["wants_credentials"] = True
     interests = [i.strip()[:60] for i in body.interests if i.strip()]
@@ -970,7 +1320,7 @@ async def list_subscribers(lid: str, ohash: str = Depends(require_owner)):
 
 
 class SubscriberUpdate(BaseModel):
-    status: Literal["new", "contacted", "added"]
+    status: Literal["new", "contacted", "added", "unsubscribed"]
 
 
 @api.put("/libraries/{lid}/subscribers/{sid}")

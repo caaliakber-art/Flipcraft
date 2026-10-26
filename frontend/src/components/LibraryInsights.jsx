@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { Button } from "./ui/button";
 import { api, errMsg } from "../lib/api";
 
+const CHANNEL_NAMES = { linkedin: "LinkedIn", whatsapp: "WhatsApp", email: "Email", copy: "Copied link", share: "Phone share menu", website: "Your website", search: "Search engines", x: "X (Twitter)", facebook: "Facebook", direct: "Direct or bookmarked", other: "Other" };
 const fmtTime = (s) => (!s ? "0s" : s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`);
 const fmtDate = (iso) => { try { return new Date(iso).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }); } catch { return iso; } };
 
@@ -74,11 +75,27 @@ export function LibraryStats({ id }) {
           <p className="text-[11px] text-slate-500 mt-3">From each reader's time zone. Your own visits while signed in aren't counted.</p>
         </div>
       </div>
+      <div className="rounded-xl border border-white/10 p-4" data-testid="channels">
+        <div className="text-xs text-slate-400 mb-3">How readers arrived</div>
+        {!s.channels?.length ? <p className="text-sm text-slate-500">No visits yet. Links shared from the library's Share button are tagged, so LinkedIn, WhatsApp and email show up here.</p> : (
+          <div className="grid sm:grid-cols-2 gap-x-8 gap-y-2">
+            {s.channels.map((c) => {
+              const max = Math.max(...s.channels.map((x) => x.views));
+              return (
+                <div key={c.name} className="text-sm">
+                  <div className="flex justify-between"><span>{CHANNEL_NAMES[c.name] || c.name}</span><span className="tabular-nums text-slate-400">{c.views}</span></div>
+                  <div className="h-1 mt-1 rounded bg-white/5"><div className="h-1 rounded bg-blue-400/70" style={{ width: `${(c.views / max) * 100}%` }} /></div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
 
-const STATUS = { new: "New", contacted: "Contacted", added: "Added to list" };
+const STATUS = { new: "New", contacted: "Contacted", added: "Added to list", unsubscribed: "Unsubscribed" };
 
 export function Subscribers({ id, title }) {
   const [list, setList] = useState(null);

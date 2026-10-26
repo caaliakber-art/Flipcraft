@@ -18,6 +18,39 @@ const headline = (it) => (undated(it) ? it?.label || "" : monthOf(it));
 const issueName = (it) => (it?.special && !undated(it) ? `${it.kind}, ${it.label}` : it?.label || "");
 const shortLabel = (it) => (it?.special ? (it.kind || "Special").replace(/\s*edition$/i, "") : `${monthOf(it).slice(0, 3)} ${yearOf(it).slice(2)}`);
 const WIDE = 1280;
+// contents-page headlines in reading order; the index is the "h" in single-update share links
+const flatHeads = (it) => (it?.toc || []).flatMap((s) => s.items.map((h) => ({ title: h.title, section: s.section, page: h.page }))).map((h, idx) => ({ ...h, idx }));
+const fmtDate = (iso) => { try { return new Date(iso + "T00:00:00").toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }); } catch { return iso; } };
+const upcoming = (it) => (it?.deadlines || []).filter((d) => d.date >= new Date().toISOString().slice(0, 10)).sort((a, b) => a.date.localeCompare(b.date));
+function downloadIcs(events, filename, link) {
+  const esc = (v) => String(v).replace(/[\\;,]/g, (c) => "\\" + c).replace(/\n/g, "\\n");
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+  const day = (iso, plus = 0) => { const d = new Date(iso + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() + plus); return d.toISOString().slice(0, 10).replace(/-/g, ""); };
+  const lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//FlipCraft//Library//EN", "CALSCALE:GREGORIAN"];
+  events.forEach((e, i) => lines.push("BEGIN:VEVENT", `UID:${Date.now()}-${i}@flipcraft`, `DTSTAMP:${stamp}`, `DTSTART;VALUE=DATE:${day(e.date)}`, `DTEND;VALUE=DATE:${day(e.date, 1)}`,
+    `SUMMARY:${esc(e.title)}`, `DESCRIPTION:${esc(e.note || "")}`, `URL:${link}`, "BEGIN:VALARM", "ACTION:DISPLAY", `DESCRIPTION:${esc(e.title)}`, "TRIGGER:-P3D", "END:VALARM", "END:VEVENT"));
+  lines.push("END:VCALENDAR");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([lines.join("\r\n") + "\r\n"], { type: "text/calendar" }));
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+// where this visit came from: our share buttons tag links with ?via=, otherwise the referring site
+function channelOf(via, embed) {
+  if (via) return via;
+  if (embed) return "website";
+  let host = "";
+  try { host = document.referrer ? new URL(document.referrer).hostname : ""; } catch { /* no referrer */ }
+  if (!host || host === window.location.hostname) return "direct";
+  if (/linkedin\.com|lnkd\.in/.test(host)) return "linkedin";
+  if (/whatsapp/.test(host)) return "whatsapp";
+  if (/google\.|bing\.|duckduckgo|yahoo\./.test(host)) return "search";
+  if (/(^|\.)t\.co$|twitter|x\.com/.test(host)) return "x";
+  if (/facebook|fb\.com/.test(host)) return "facebook";
+  if (/mail|outlook/.test(host)) return "email";
+  return "website";
+}
 const isWide = () => window.innerWidth >= WIDE;
 
 /* Issues are fetched once and reused, and fetched early when a cover is hovered,
@@ -448,46 +481,67 @@ function SubscribeDialog({ slug, lib, topics, issue, credentials = false, onClos
 /* ------------------------------------------------------------------ share
    Links go through the server's share page so LinkedIn and WhatsApp show the
    issue's cover and title in the post, then land on the library. */
-function ShareSheet({ slug, lib, item, page = 0, onClose }) {
+function ShareSheet({ slug, lib, item, page = 0, head = null, onClose }) {
   const brand = shortName(lib.brand?.name) || lib.brand?.name || "";
-  const url = `${API}/share/${slug}${item ? `?issue=${item.flipbook_id}${page > 0 ? `&page=${page + 1}` : ""}` : ""}`;
+  // updates on the page being read, so "this update" can be offered from the reader too
+  const onPage = useMemo(() => (item && !head ? flatHeads(item).filter((h) => h.page != null && (h.page === page || h.page === page + 1)) : []), [item, head, page]);
+  const [pick, setPick] = useState(head || null);
   const name = item ? issueName(item) : "";
   const topics = item ? topicsOf(item).filter((t) => t !== "Special editions").slice(0, 3) : [];
-  const [text, setText] = useState(() => item
+  const issueText = item
     ? `Worth a read: ${brand ? brand + "'s " : ""}${lib.title}, ${name}.${topics.length ? ` Covers ${topics.join(", ")}.` : ""}${lib.pitch_title ? ` ${lib.pitch_title}` : ""}`
-    : `${brand ? brand + "'s " : ""}${lib.title}: every issue in one place, searchable.${lib.pitch_title ? ` ${lib.pitch_title}` : ""}`);
+    : `${brand ? brand + "'s " : ""}${lib.title}: every issue in one place, searchable.${lib.pitch_title ? ` ${lib.pitch_title}` : ""}`;
+  const headText = (h) => `${h.title}. A short read from ${brand ? brand + "'s " : ""}${lib.title} (${name}), with the full issue a tap away.`;
+  const [text, setText] = useState(() => (head ? headText(head) : issueText));
+  const choose = (h) => { setPick(h); setText(h ? headText(h) : issueText); };
   const [copied, setCopied] = useState(false);
   useEffect(() => { const k = (e) => e.key === "Escape" && onClose(); window.addEventListener("keydown", k); return () => window.removeEventListener("keydown", k); }, [onClose]);
-  const full = `${text}\n${url}`;
+  const link = (via) => {
+    const q = new URLSearchParams();
+    if (item) q.set("issue", item.flipbook_id);
+    if (pick) q.set("h", String(pick.idx));
+    else if (item && page > 0) q.set("page", String(page + 1));
+    q.set("via", via);
+    return `${API}/share/${slug}?${q.toString()}`;
+  };
+  const full = (via) => `${text}\n${link(via)}`;
   const open = (href) => window.open(href, "_blank", "noopener,noreferrer");
-  const copy = async () => { await copyText(url); setCopied(true); setTimeout(() => setCopied(false), 1800); };
+  const copy = async () => { await copyText(link("copy")); setCopied(true); setTimeout(() => setCopied(false), 1800); };
   const native = typeof navigator !== "undefined" && navigator.share;
   const opt = "h-14 rounded-2xl flex items-center gap-3 px-4 text-left text-[15px] transition-colors";
   return (
     <div className="absolute inset-0 z-50 grid place-items-end sm:place-items-center p-3 sm:p-6 lib-spot-in" role="dialog" aria-modal="true" aria-label="Share" data-testid="share-sheet">
       <button className="absolute inset-0 w-full h-full bg-[#0a1626]/70 backdrop-blur-sm cursor-default" onClick={onClose} aria-label="Close" tabIndex={-1} />
-      <div className="lib-glass lib-spot relative w-[min(520px,100%)] max-h-full overflow-y-auto lib-scroll rounded-3xl p-6 bg-[#0f1f33]/90">
+      <div className="lib-glass lib-spot relative w-[min(540px,100%)] max-h-full overflow-y-auto lib-scroll rounded-3xl p-6 bg-[#0f1f33]/90">
         <button onClick={onClose} className="absolute right-4 top-4 w-9 h-9 grid place-items-center rounded-full hover:bg-white/10" aria-label="Close"><X className="w-4 h-4" /></button>
         <div className="flex items-center gap-4 pr-10">
           {item && <img src={fileUrl(item.thumb)} alt="" className="w-12 rounded-[2px] shadow-lg" />}
           <div className="min-w-0">
-            <h2 className="text-[22px] font-light leading-tight">Share {item ? "this issue" : "the library"}</h2>
-            <p className="text-[13.5px] text-white/55 mt-0.5 truncate">{item ? name : lib.title}{item && page > 0 ? `, page ${page + 1}` : ""}</p>
+            <h2 className="text-[22px] font-light leading-tight">{pick ? "Share this update" : `Share ${item ? "this issue" : "the library"}`}</h2>
+            <p className="text-[13.5px] text-white/55 mt-0.5 line-clamp-2">{pick ? pick.title : item ? name : lib.title}</p>
           </div>
         </div>
+        {item && (onPage.length > 0 || head) && (
+          <div className="mt-5 flex flex-wrap gap-1.5" role="tablist" data-testid="share-scope">
+            {(head ? [head] : onPage).slice(0, 3).map((h) => (
+              <button key={h.idx} role="tab" aria-selected={pick?.idx === h.idx} onClick={() => choose(h)} className={`max-w-full h-8 px-3 rounded-full text-[13px] truncate transition-colors ${pick?.idx === h.idx ? "bg-white text-[color:var(--ink)]" : "bg-white/[0.08] text-white/80 hover:bg-white/15"}`}>This update: {h.title}</button>
+            ))}
+            <button role="tab" aria-selected={!pick} onClick={() => choose(null)} className={`h-8 px-3 rounded-full text-[13px] transition-colors ${!pick ? "bg-white text-[color:var(--ink)]" : "bg-white/[0.08] text-white/80 hover:bg-white/15"}`}>Whole issue</button>
+          </div>
+        )}
         <p className="mt-5 text-[13px] text-white/55">Your post</p>
         <textarea value={text} onChange={(e) => setText(e.target.value)} rows={3} className="mt-1.5 w-full rounded-xl bg-black/25 border border-white/12 p-3 text-[14.5px] leading-relaxed focus:outline-none focus:border-[color:var(--mist)] resize-none" data-testid="share-text" />
         <div className="mt-4 grid grid-cols-2 gap-2.5">
-          <button onClick={() => open(`https://www.linkedin.com/feed/?shareActive=true&text=${encodeURIComponent(full)}`)} className={`${opt} bg-[#0a66c2] hover:bg-[#0b5cad] col-span-2 sm:col-span-1`} data-testid="share-linkedin">
+          <button onClick={() => open(`https://www.linkedin.com/feed/?shareActive=true&text=${encodeURIComponent(full("linkedin"))}`)} className={`${opt} bg-[#0a66c2] hover:bg-[#0b5cad] col-span-2 sm:col-span-1`} data-testid="share-linkedin">
             <span className="w-8 h-8 rounded-md bg-white text-[#0a66c2] grid place-items-center font-bold text-[15px]">in</span>Post on LinkedIn</button>
-          <button onClick={() => open(`https://wa.me/?text=${encodeURIComponent(full)}`)} className={`${opt} bg-[#1fa855] hover:bg-[#1b9a4d] col-span-2 sm:col-span-1`} data-testid="share-whatsapp">
+          <button onClick={() => open(`https://wa.me/?text=${encodeURIComponent(full("whatsapp"))}`)} className={`${opt} bg-[#1fa855] hover:bg-[#1b9a4d] col-span-2 sm:col-span-1`} data-testid="share-whatsapp">
             <svg viewBox="0 0 24 24" className="w-7 h-7 fill-white" aria-hidden="true"><path d="M12 2a10 10 0 0 0-8.6 15.1L2 22l5-1.3A10 10 0 1 0 12 2zm0 18.2a8.2 8.2 0 0 1-4.2-1.1l-.3-.2-3 .8.8-2.9-.2-.3A8.2 8.2 0 1 1 12 20.2zm4.5-6.1c-.2-.1-1.5-.7-1.7-.8-.2-.1-.4-.1-.6.1l-.8 1c-.1.2-.3.2-.5.1a6.7 6.7 0 0 1-3.3-2.9c-.2-.4.2-.4.7-1.2.1-.2 0-.3 0-.4l-.8-1.8c-.2-.5-.4-.4-.6-.4h-.5a1 1 0 0 0-.7.3 3 3 0 0 0-.9 2.2 5.2 5.2 0 0 0 1.1 2.7 11.9 11.9 0 0 0 4.6 4c1.7.7 2.4.8 3.2.7.5-.1 1.5-.6 1.7-1.2.2-.6.2-1.1.2-1.2-.1-.1-.3-.2-.5-.3z"/></svg>
             Send on WhatsApp</button>
-          <button onClick={() => open(`mailto:?subject=${encodeURIComponent(item ? `${lib.title}: ${name}` : lib.title)}&body=${encodeURIComponent(full)}`)} className={`${opt} bg-white/[0.07] hover:bg-white/[0.13]`}><Mail className="w-5 h-5" />Email</button>
+          <button onClick={() => open(`mailto:?subject=${encodeURIComponent(pick ? pick.title : item ? `${lib.title}: ${name}` : lib.title)}&body=${encodeURIComponent(full("email"))}`)} className={`${opt} bg-white/[0.07] hover:bg-white/[0.13]`}><Mail className="w-5 h-5" />Email</button>
           <button onClick={copy} className={`${opt} bg-white/[0.07] hover:bg-white/[0.13]`} data-testid="share-copy">{copied ? <Check className="w-5 h-5" /> : <Link2 className="w-5 h-5" />}{copied ? "Link copied" : "Copy link"}</button>
-          {native && <button onClick={() => navigator.share({ title: lib.title, text, url }).catch(() => {})} className={`${opt} bg-white/[0.07] hover:bg-white/[0.13] col-span-2 justify-center`}><Share2 className="w-5 h-5" />More options</button>}
+          {native && <button onClick={() => navigator.share({ title: lib.title, text, url: link("share") }).catch(() => {})} className={`${opt} bg-white/[0.07] hover:bg-white/[0.13] col-span-2 justify-center`}><Share2 className="w-5 h-5" />More options</button>}
         </div>
-        <p className="mt-4 text-[12px] text-white/45 leading-relaxed">The link shows the cover and title in the post and opens {item ? "straight to this issue" : "the library"}.</p>
+        <p className="mt-4 text-[12px] text-white/45 leading-relaxed">{pick ? "The post shows this headline and opens the issue at its page, with the full issue one tap away." : `The link shows the cover and title in the post and opens ${item ? "straight to this issue" : "the library"}.`}</p>
       </div>
     </div>
   );
@@ -760,26 +814,64 @@ function MobileBrowse({ items, latest, onOpen, onActive, tagline, pitch, onSubsc
   );
 }
 
+/* Dates the firm has marked as worth acting on, each one a tap away from the calendar. */
+function DatesToAct({ lib, item, slug, compact = false, max = 6 }) {
+  const all = upcoming(item);
+  if (!all.length) return null;
+  const list = all.slice(0, max);
+  const link = `${window.location.origin}/library/${slug}?issue=${item.flipbook_id}`;
+  const note = `From ${lib.title}, ${issueName(item)}: ${link}`;
+  const file = (n) => `${(lib.title || "dates").replace(/\W+/g, "-")}-${n}.ics`;
+  return (
+    <div className={compact ? "" : "rounded-2xl bg-white/[0.06] border border-white/10 p-4"} data-testid="dates-to-act">
+      <div className="flex items-center justify-between gap-3 mb-2">
+        <p className="lib-cond uppercase tracking-[0.14em] text-[11.5px] text-[color:var(--mist)]">Dates to act on</p>
+        {list.length > 1 && !compact && <button onClick={() => downloadIcs(list.map((d) => ({ ...d, note })), file("dates"), link)} className="lib-cond text-[12px] text-white/60 hover:text-white">Add all to calendar</button>}
+      </div>
+      <ul className="space-y-1.5">
+        {list.map((d, i) => (
+          <li key={i} className="flex items-start gap-3 text-[13.5px] leading-snug">
+            <span className="lib-cond shrink-0 w-[84px] text-white">{fmtDate(d.date)}</span>
+            <span className="flex-1 text-white/75">{d.title}</span>
+            <button onClick={() => downloadIcs([{ ...d, note }], file(d.date), link)} className="shrink-0 text-[12px] text-[color:var(--mist)] hover:text-white" aria-label={`Add ${d.title} on ${fmtDate(d.date)} to calendar`} title="Add to calendar">+ Calendar</button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 /* ------------------------------------------------------------------ reader */
-function IssuePanel({ item, onGo, onStart }) {
+function IssuePanel({ item, onGo, onStart, onShareHead, lib, slug }) {
+  const heads = flatHeads(item);
+  let n = 0;
   return (
     <div className="h-full flex flex-col justify-center px-7 sm:px-10">
       <p className="text-[14px] text-white/55">{item.special ? item.kind : "In this issue"}</p>
       <h2 className="text-[clamp(28px,3.2vw,44px)] font-light leading-[1.05] mt-1">{item.label}</h2>
+      {lib && upcoming(item).length > 0 && <div className="mt-4"><DatesToAct lib={lib} item={item} slug={slug} max={3} /></div>}
       {item.toc?.length > 0 ? (
-        <div className="mt-6 space-y-5 overflow-y-auto lib-scroll min-h-0 pr-2" style={{ maxHeight: "62%" }}>
+        <div className="mt-5 space-y-5 overflow-y-auto lib-scroll min-h-0 pr-2" style={{ maxHeight: upcoming(item).length ? "44%" : "62%" }}>
           {item.toc.map((s) => (
             <div key={s.section}>
               <h3 className="lib-cond text-[13px] text-[color:var(--mist)] mb-1.5">{s.section}</h3>
               <ul className="space-y-1">
-                {s.items.map((h, i) => (
-                  <li key={i}>
-                    <button disabled={h.page == null} onClick={() => onGo(h.page)} className="text-left text-[14px] leading-snug text-white/80 hover:text-white disabled:hover:text-white/80 flex gap-2 group">
-                      <span className="flex-1">{h.title}</span>
-                      {h.page != null && <span className="lib-cond text-[12px] text-white/40 group-hover:text-white/80 pt-0.5">p{h.page + 1}</span>}
-                    </button>
-                  </li>
-                ))}
+                {s.items.map((h, i) => {
+                  const head = heads[n++];
+                  return (
+                    <li key={i} className="flex items-start gap-2 group/h">
+                      <button disabled={h.page == null} onClick={() => onGo(h.page)} className="flex-1 text-left text-[14px] leading-snug text-white/80 hover:text-white disabled:hover:text-white/80 flex gap-2 group">
+                        <span className="flex-1">{h.title}</span>
+                        {h.page != null && <span className="lib-cond text-[12px] text-white/40 group-hover:text-white/80 pt-0.5">p{h.page + 1}</span>}
+                      </button>
+                      {onShareHead && h.page != null && (
+                        <button onClick={() => onShareHead(head)} className="shrink-0 w-6 h-6 -mt-0.5 grid place-items-center rounded-full text-white/40 hover:text-white hover:bg-white/10 sm:opacity-0 sm:group-hover/h:opacity-100 focus:opacity-100 transition-opacity" aria-label={`Share: ${h.title}`} title="Share this update" data-testid={`share-head-${head.idx}`}>
+                          <Share2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           ))}
@@ -818,7 +910,7 @@ function NextPanel({ next, onOpen, onBack, onSubscribe, subscribed }) {
   );
 }
 
-function Reader({ slug, item, items, startPage, embed, onOpen, onBack, onPage, onShown, onSubscribe, subscribed, onShare }) {
+function Reader({ slug, lib, item, items, startPage, embed, onOpen, onBack, onPage, onShown, onSubscribe, subscribed, onShare, channel, sharedHead, onClearShared }) {
   const [book, setBook] = useState(null);
   const [page, setPage] = useState(0);
   const [portrait, setPortrait] = useState(false);
@@ -843,10 +935,10 @@ function Reader({ slug, item, items, startPage, embed, onOpen, onBack, onPage, o
     setBook(null); setPage(0); setSeen(new Set([startPage || 0])); pending.current = startPage; shown.current = false;
     loadBook(item.flipbook_id).then((data) => {
       if (!live) return;
-      setBook(data); setSound(data.sound);
+      setBook(data); setSound(false); // page-turn sound is opt-in for the library: most people read at work
       let tz = "";
       try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch { /* old browsers */ }
-      track(item.flipbook_id, { open: true, pages: [startPage || 0], source: embed ? "embed" : "link", tz });
+      track(item.flipbook_id, { open: true, pages: [startPage || 0], source: embed ? "embed" : "link", tz, channel });
     }).catch(() => { toast.error("This issue couldn't be opened"); onShown?.(null); });
     // reading time, counted only while the page is actually visible
     const beat = setInterval(() => { if (document.visibilityState === "visible") track(item.flipbook_id, { seconds: 15 }); }, 15000);
@@ -904,10 +996,24 @@ function Reader({ slug, item, items, startPage, embed, onOpen, onBack, onPage, o
   const blankLeft = !portrait && rect && page === 0 && zoom === 1;
   const blankRight = !portrait && rect && page === n - 1 && n % 2 === 0 && zoom === 1;
   const share = () => onShare(item, page);
+  const shareHead = (h) => onShare(item, h.page ?? page, h);
+  const goTo = (p) => { const r = flipRef.current?.go(p); if (r != null) setPage(r); setTimeout(measure, 60); };
   const toggleFs = () => (document.fullscreenElement ? document.exitFullscreen() : rootRef.current.requestFullscreen?.());
 
   return (
-    <div ref={rootRef} className="h-full flex flex-col min-h-0" data-testid="library-reader">
+    <div ref={rootRef} className="h-full flex flex-col min-h-0 relative" data-testid="library-reader">
+      {sharedHead && (
+        <div className="absolute z-20 left-1/2 -translate-x-1/2 top-2 w-[min(640px,calc(100%-24px))] lib-swap" data-testid="shared-banner">
+          <div className="lib-glass bg-[#0f1f33]/90 rounded-2xl pl-4 pr-2 py-2.5 flex items-center gap-3 shadow-2xl">
+            <div className="min-w-0 flex-1">
+              <p className="lib-cond text-[11.5px] uppercase tracking-[0.14em] text-[color:var(--mist)]">Shared with you</p>
+              <p className="text-[14px] leading-snug truncate">{sharedHead.title}</p>
+            </div>
+            <button onClick={() => { goTo(0); onClearShared(); }} className="shrink-0 h-9 px-3.5 rounded-full bg-white text-[color:var(--ink)] text-[13px] font-medium" data-testid="shared-full">Read the whole issue</button>
+            <button onClick={onClearShared} className="shrink-0 w-8 h-8 grid place-items-center rounded-full hover:bg-white/10 text-white/60" aria-label="Dismiss"><X className="w-4 h-4" /></button>
+          </div>
+        </div>
+      )}
       <div className={`flex-1 min-h-0 ${zoom > 1 ? "overflow-auto lib-scroll" : "overflow-hidden"} flex`}>
         <div className="m-auto shrink-0 p-3 sm:p-6 relative" style={{ width: `${zoom * 100}%`, height: `${zoom * 100}%` }}>
           <div className="relative w-full h-full">
@@ -921,7 +1027,7 @@ function Reader({ slug, item, items, startPage, embed, onOpen, onBack, onPage, o
               </div>, sheet)}
             {blankLeft && (
               <div className={`absolute fc-inside fc-inside-left ${moving ? "z-0" : "z-[5]"}`} style={{ left: rect.left, top: rect.top, width: rect.pageWidth, height: rect.height }}>
-                <IssuePanel item={item} onGo={(p) => { const r = flipRef.current?.go(p); if (r != null) setPage(r); setTimeout(measure, 60); }} onStart={() => flipRef.current?.next()} />
+                <IssuePanel item={item} lib={lib} slug={slug} onShareHead={shareHead} onGo={goTo} onStart={() => flipRef.current?.next()} />
               </div>
             )}
             {blankRight && (
@@ -947,7 +1053,7 @@ function Reader({ slug, item, items, startPage, embed, onOpen, onBack, onPage, o
       <Sheet open={contents} onOpenChange={setContents}>
         <SheetContent side="bottom" className="lib bg-[#0f1f33] border-white/10 h-[75vh] text-white p-0">
           <div className="h-full overflow-y-auto lib-scroll px-6 pt-8 pb-6">
-            <IssuePanel item={item} onGo={(p) => { const r = flipRef.current?.go(p); if (r != null) setPage(r); setContents(false); }} onStart={() => { flipRef.current?.next(); setContents(false); }} />
+            <IssuePanel item={item} lib={lib} slug={slug} onShareHead={(h) => { setContents(false); shareHead(h); }} onGo={(p) => { const r = flipRef.current?.go(p); if (r != null) setPage(r); setContents(false); }} onStart={() => { flipRef.current?.next(); setContents(false); }} />
           </div>
         </SheetContent>
       </Sheet>
@@ -1101,7 +1207,9 @@ export default function Library({ embed = false }) {
   const [topic, setTopic] = useState("all");
   const [leaving, setLeaving] = useState(false);
   const [subOpen, setSubOpen] = useState(false); // false | "subscribe" | "credentials"
-  const [shareOf, setShareOf] = useState(null); // null | { item, page }
+  const [shareOf, setShareOf] = useState(null); // null | { item, page, head }
+  const [channel] = useState(() => channelOf(params.get("via"), embed));
+  const [sharedH, setSharedH] = useState(() => { const v = parseInt(params.get("h"), 10); return Number.isFinite(v) ? v : null; });
   const [subscribed, setSubscribed] = useState(() => readSubscribed(slug));
   const hero = useTilt(7);
   const mobile = useIsMobile();
@@ -1193,6 +1301,7 @@ export default function Library({ embed = false }) {
 
   const onFocus = (it) => { clearTimeout(focusTimer.current); focusTimer.current = setTimeout(() => setFocus(it), 90); };
   const openIssue = (it, page = 0) => {
+    setSharedH(null);
     setOpen(it); setStartPage(page); setSearchSheet(false); setReadPage(page); setLeaving(false);
     if (spot) { setSpot(null); }
     if (isWide()) setAskOpen(true);
@@ -1348,6 +1457,7 @@ export default function Library({ embed = false }) {
                       </ul>
                     </div>
                   )}
+                  {upcoming(featured).length > 0 && <div className="mt-6 max-w-lg"><DatesToAct lib={lib} item={featured} slug={slug} max={3} /></div>}
                   <div className="mt-8 flex items-center gap-4">
                     <button onClick={() => fly(featured, hero.target.current)} className="h-12 px-7 rounded-full bg-white text-[color:var(--ink)] text-[15px] font-medium hover:bg-[color:var(--paper)] active:scale-[0.98] transition" data-testid="library-read">Read {featured?.special ? "edition" : monthOf(featured)}</button>
                     <button onClick={() => setShareOf({ item: featured, page: 0 })} className="h-12 w-12 rounded-full lib-glass grid place-items-center hover:bg-white/15 transition-colors" aria-label={`Share ${issueName(featured)}`} title="Share" data-testid="hero-share"><Share2 className="w-[18px] h-[18px]" /></button>
@@ -1422,7 +1532,9 @@ export default function Library({ embed = false }) {
             <main className="min-h-0 grid grid-cols-1 md:grid-cols-[84px_minmax(0,1fr)]" data-testid="library-reading">
               <div className="hidden md:block min-h-0 border-r border-white/[0.06]"><DockRail items={items} current={open.flipbook_id} onOpen={openIssue} /></div>
               <Reader slug={slug} item={open} items={items} startPage={startPage} embed={embed} onOpen={openIssue} onBack={back} onPage={setReadPage}
-                onShown={land} onSubscribe={() => setSubOpen("subscribe")} subscribed={subscribed} onShare={(it, p) => setShareOf({ item: it, page: p })} />
+                onShown={land} onSubscribe={() => setSubOpen("subscribe")} subscribed={subscribed} onShare={(it, p, head) => setShareOf({ item: it, page: p, head: head || null })}
+                lib={lib} channel={channel} sharedHead={sharedH != null && open ? flatHeads(open)[sharedH] || null : null}
+                onClearShared={() => { setSharedH(null); setParams((p) => { p.delete("h"); p.delete("via"); return p; }, { replace: true }); }} />
             </main>
           )}
         </div>
@@ -1447,7 +1559,7 @@ export default function Library({ embed = false }) {
 
       {subOpen && <SubscribeDialog slug={slug} lib={lib} topics={topics} issue={open} credentials={subOpen === "credentials"} onClose={() => setSubOpen(false)} onDone={() => setSubscribed(true)} />}
       <InstallPrompt slug={slug} lib={lib} embed={embed} />
-      {shareOf && <ShareSheet slug={slug} lib={lib} item={shareOf.item} page={shareOf.page} onClose={() => setShareOf(null)} />}
+      {shareOf && <ShareSheet slug={slug} lib={lib} item={shareOf.item} page={shareOf.page} head={shareOf.head} onClose={() => setShareOf(null)} />}
     </div>
   );
 }

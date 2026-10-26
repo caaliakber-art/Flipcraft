@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, Code2, ExternalLink, FileUp, Link2, Loader2, Trash2 } from "lucide-react";
+import { ArrowLeft, CalendarPlus, Code2, ExternalLink, FileUp, Link2, Loader2, Mail, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Switch } from "../components/ui/switch";
 import { api, copyText, errMsg, fileUrl } from "../lib/api";
 import { LibraryStats, Subscribers } from "../components/LibraryInsights";
+import { DatesDialog, EmailDialog, datesLabel } from "../components/IssueTools";
 
 const Field = ({ label, children }) => (
   <label className="block space-y-1.5">
@@ -23,6 +24,8 @@ export default function LibraryEditor() {
   const [items, setItems] = useState([]);
   const [dirty, setDirty] = useState(false);
   const [queue, setQueue] = useState([]);
+  const [datesFor, setDatesFor] = useState(null);
+  const [emailFor, setEmailFor] = useState(null);
   const fileRef = useRef(null);
 
   const apply = (data, keepEdits = false) => {
@@ -30,7 +33,7 @@ export default function LibraryEditor() {
     if (!keepEdits) { setForm({ title: data.title, subtitle: data.subtitle, pitch_title: data.pitch_title || "", pitch_text: data.pitch_text || "", offer_credentials: !!data.offer_credentials }); setItems(data.items); setDirty(false); }
     else setItems((cur) => data.items.map((i) => cur.find((c) => c.flipbook_id === i.flipbook_id) ? { ...i, ...pick(cur.find((c) => c.flipbook_id === i.flipbook_id)) } : i));
   };
-  const pick = (i) => ({ label: i.label, date: i.date, special: i.special, kind: i.kind });
+  const pick = (i) => ({ label: i.label, date: i.date, special: i.special, kind: i.kind, deadlines: i.deadlines || [] });
   const load = useCallback((keep = false) => api.get(`/libraries/${id}`).then((r) => apply(r.data, keep)).catch((e) => { toast.error(errMsg(e)); nav("/"); }), [id]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, [load]);
 
@@ -134,6 +137,12 @@ export default function LibraryEditor() {
                     <Input type="month" value={it.date} onChange={(e) => setItem(it.flipbook_id, { date: e.target.value })} aria-label="Issue month" />
                     {it.special && <Input value={it.kind} onChange={(e) => setItem(it.flipbook_id, { kind: e.target.value })} placeholder="Edition name, e.g. AIF edition" className="sm:col-span-2" />}
                     {it.status === "processing" && <p className="text-xs text-slate-400 sm:col-span-2">Preparing pages {it.pages_done}/{it.page_count || "…"}</p>}
+                    {it.status !== "processing" && (
+                      <div className="sm:col-span-2 flex flex-wrap gap-2">
+                        <Button variant="secondary" size="sm" onClick={() => setDatesFor(it)} data-testid={`dates-${it.flipbook_id}`}><CalendarPlus className="w-4 h-4 mr-1.5" />{datesLabel(it.deadlines)}</Button>
+                        <Button variant="secondary" size="sm" disabled={dirty} title={dirty ? "Save changes first" : ""} onClick={() => setEmailFor(it)} data-testid={`email-${it.flipbook_id}`}><Mail className="w-4 h-4 mr-1.5" />Email to subscribers</Button>
+                      </div>
+                    )}
                   </div>
                   <label className="flex items-center gap-2 text-xs text-slate-400 shrink-0"><Switch checked={!!it.special} onCheckedChange={(v) => setItem(it.flipbook_id, { special: v, kind: v ? it.kind || "Special edition" : "" })} />Special</label>
                   <Button variant="ghost" size="icon" onClick={() => remove(it.flipbook_id)} aria-label="Remove from library"><Trash2 className="w-4 h-4" /></Button>
@@ -168,6 +177,8 @@ export default function LibraryEditor() {
           </div>
         </aside>
       </main>
+      {datesFor && <DatesDialog libraryId={id} item={datesFor} onClose={() => setDatesFor(null)} onChange={(ds) => setItem(datesFor.flipbook_id, { deadlines: ds })} />}
+      {emailFor && <EmailDialog libraryId={id} item={emailFor} onClose={() => setEmailFor(null)} />}
     </div>
   );
 }
