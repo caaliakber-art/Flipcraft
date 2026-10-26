@@ -183,6 +183,100 @@ function SearchPanel({ slug, lib, current, onOpen, onClose, autoFocus }) {
   );
 }
 
+/* ------------------------------------------------------------------ barcode
+   The SDU barcode motif, made meaningful: one bar per issue (or per page in the
+   reader). The current bar rises and brightens; its neighbours lift a little,
+   so the code ripples as you move through the archive. */
+function Barcode({ count, active = -1, done, onPick, labels = [], height = 22, className = "" }) {
+  return (
+    <div className={`flex items-end gap-[3px] ${className}`} style={{ height }} role={onPick ? "tablist" : undefined} aria-label={onPick ? "Issues" : undefined}>
+      {Array.from({ length: count }, (_, i) => {
+        const d = Math.abs(i - active);
+        const on = d === 0;
+        const h = on ? 100 : d === 1 ? 72 : d === 2 ? 58 : 46;
+        const tone = on ? "bg-white" : done?.has(i) ? "bg-[color:var(--mist)]" : d <= 2 ? "bg-white/55" : "bg-white/30";
+        const bar = <span className={`lib-bar block w-[2px] rounded-[1px] ${tone}`} style={{ height: `${h}%`, animationDelay: `${Math.min(i, 40) * 18}ms` }} />;
+        return onPick ? (
+          <button key={i} type="button" onClick={() => onPick(i)} aria-label={labels[i] || `Item ${i + 1}`} aria-selected={on} role="tab"
+            className="h-full px-[1.5px] -mx-[1.5px] flex items-end focus:outline-none focus-visible:ring-1 focus-visible:ring-white/70 rounded-sm">{bar}</button>
+        ) : <span key={i} className="h-full flex items-end">{bar}</span>;
+      })}
+    </div>
+  );
+}
+
+function useIsMobile() {
+  const q = "(max-width: 767px)";
+  const [m, setM] = useState(() => typeof window !== "undefined" && window.matchMedia(q).matches);
+  useEffect(() => {
+    const mq = window.matchMedia(q);
+    const f = () => setM(mq.matches);
+    mq.addEventListener?.("change", f);
+    return () => mq.removeEventListener?.("change", f);
+  }, []);
+  return m;
+}
+
+/* Phone browsing: swipe through covers, Cover Flow style. */
+function MobileBrowse({ items, latest, onOpen, onActive }) {
+  const ref = useRef(null);
+  const raf = useRef(0);
+  const cur = useRef(0);
+  const [idx, setIdx] = useState(0);
+  const layout = useCallback(() => {
+    const el = ref.current;
+    if (!el) return;
+    const mid = el.scrollLeft + el.clientWidth / 2;
+    let best = 0, bd = Infinity;
+    [...el.children].forEach((ch, i) => {
+      const d = (ch.offsetLeft + ch.offsetWidth / 2 - mid) / ch.offsetWidth;
+      const a = Math.max(-1.4, Math.min(1.4, d));
+      const card = ch.firstChild;
+      if (!reduceMotion()) card.style.transform = `perspective(1100px) translateX(${-a * 14}%) rotateY(${-a * 40}deg) scale(${1 - Math.min(Math.abs(a), 1) * 0.18})`;
+      card.style.opacity = String(1 - Math.min(Math.abs(a), 1) * 0.45);
+      if (Math.abs(d) < bd) { bd = Math.abs(d); best = i; }
+    });
+    if (best !== cur.current) { cur.current = best; setIdx(best); onActive(items[best]); }
+  }, [items, onActive]);
+  useEffect(() => { layout(); }, [layout]);
+  const go = (i) => {
+    const el = ref.current, ch = el?.children[i];
+    if (ch) el.scrollTo({ left: ch.offsetLeft - (el.clientWidth - ch.offsetWidth) / 2, behavior: reduceMotion() ? "auto" : "smooth" });
+  };
+  const it = items[idx];
+  return (
+    <div className="min-h-full flex flex-col pb-6" data-testid="library-mobile">
+      <div ref={ref} onScroll={() => { cancelAnimationFrame(raf.current); raf.current = requestAnimationFrame(layout); }}
+        className="lib-noscroll flex overflow-x-auto pt-5 pb-2" style={{ scrollSnapType: "x mandatory", paddingInline: "calc(50vw - min(26vw, 125px))" }}>
+        {items.map((x, i) => (
+          <div key={x.flipbook_id} className="shrink-0 w-[52vw] max-w-[250px] px-1.5" style={{ scrollSnapAlign: "center" }}>
+            <button type="button" onClick={() => (i === idx ? onOpen(x) : go(i))} className="block w-full will-change-transform" aria-label={`${i === idx ? "Open" : "Show"} ${x.label}`} data-testid={`carousel-${x.flipbook_id}`}>
+              <Cover src={x.cover || x.thumb} aspect={x.aspect} width="100%" eager={i < 3} />
+            </button>
+          </div>
+        ))}
+      </div>
+      <div className="px-6 flex justify-center pt-2"><Barcode count={items.length} active={idx} onPick={go} labels={items.map((x) => x.label)} height={24} /></div>
+      {it && (
+        <div key={it.flipbook_id} className="lib-swap px-6 pt-4 text-center">
+          <p className="text-[14px] text-white/55">{it.special ? it.kind : it.flipbook_id === latest?.flipbook_id ? "Latest issue" : "From the archive"}</p>
+          <h1 className="mt-1 leading-none tracking-[-0.03em]">
+            <span className="text-[clamp(36px,11vw,48px)] font-light">{monthOf(it)}</span>
+            <span className="ml-2.5 text-[clamp(20px,6vw,26px)] font-light text-[color:var(--mist)]">{yearOf(it)}</span>
+          </h1>
+          {it.toc?.length > 0 && (
+            <div className="mt-3 flex flex-wrap justify-center gap-1.5">
+              {it.toc.slice(0, 3).map((s) => <span key={s.section} className="lib-cond h-7 px-3 rounded-full bg-white/[0.08] border border-white/10 text-[12.5px] text-white/80 inline-flex items-center">{s.section}</span>)}
+            </div>
+          )}
+          <button onClick={() => onOpen(it)} className="mt-5 h-12 px-8 rounded-full bg-white text-[color:var(--ink)] text-[15px] font-medium active:scale-[0.98] transition" data-testid="mobile-read">Read {it.special ? "edition" : monthOf(it)}</button>
+          <p className="lib-cond mt-3 text-[12.5px] text-white/45">{it.page_count} pages. Swipe for other issues.</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ------------------------------------------------------------------ reader */
 function IssuePanel({ item, onGo, onStart }) {
   return (
@@ -244,6 +338,8 @@ function Reader({ slug, item, items, startPage, embed, onOpen, onBack }) {
   const [fs, setFs] = useState(false);
   const [thumbs, setThumbs] = useState(false);
   const [rect, setRect] = useState(null);
+  const [seen, setSeen] = useState(() => new Set([0]));
+  const [contents, setContents] = useState(false);
   const flipRef = useRef(null);
   const rootRef = useRef(null);
   const soundRef = useRef(true);
@@ -251,7 +347,7 @@ function Reader({ slug, item, items, startPage, embed, onOpen, onBack }) {
   const pending = useRef(startPage);
 
   useEffect(() => {
-    setBook(null); setPage(0); pending.current = startPage;
+    setBook(null); setPage(0); setSeen(new Set([startPage || 0])); pending.current = startPage;
     publicApi.get(`/flipbooks/${item.flipbook_id}`).then((r) => {
       setBook(r.data); setSound(r.data.sound);
       track(item.flipbook_id, { open: true, pages: [startPage || 0], source: embed ? "embed" : "link" });
@@ -270,7 +366,7 @@ function Reader({ slug, item, items, startPage, embed, onOpen, onBack }) {
   }, [measure]);
   useEffect(() => { const t = setTimeout(() => { flipRef.current?.update(); measure(); }, 40); return () => clearTimeout(t); }, [zoom, fs, measure]);
 
-  const onFlip = useCallback((p, visible) => { setPage(p); track(item.flipbook_id, { pages: visible }); setTimeout(measure, 30); }, [item.flipbook_id, measure]);
+  const onFlip = useCallback((p, visible) => { setPage(p); setSeen((s0) => new Set([...s0, ...visible])); track(item.flipbook_id, { pages: visible }); setTimeout(measure, 30); }, [item.flipbook_id, measure]);
   const onTurnStart = useCallback(() => soundRef.current && playFlip(), []);
   const onReady = useCallback((o) => {
     setPortrait(o === "portrait");
@@ -309,11 +405,24 @@ function Reader({ slug, item, items, startPage, embed, onOpen, onBack }) {
           </div>
         </div>
       </div>
+      <div className="shrink-0 flex items-center justify-center gap-4 pt-1 pb-2 px-3">
+        {portrait && item.toc?.length > 0 && (
+          <button onClick={() => setContents(true)} className="h-8 px-3.5 rounded-full lib-glass text-[13px] shrink-0" data-testid="reader-contents">Contents</button>
+        )}
+        <Barcode count={n} active={page} done={seen} onPick={(i) => { const r = flipRef.current?.go(i); if (r != null) setPage(r); setTimeout(measure, 60); }} labels={book.pages.map((_, i) => `Page ${i + 1}`)} height={16} />
+      </div>
       <div className="shrink-0 flex justify-center pb-4 pt-1">
         <ViewerToolbar label={`${shown} / ${n}`} canPrev={page > 0} canNext={page < n - (portrait ? 1 : 2) || (page === 0 && n > 1)} onPrev={() => flipRef.current.prev()} onNext={() => flipRef.current.next()}
           zoom={zoom} onZoom={(d) => setZoom((z) => Math.min(3, Math.max(1, z + d)))} sound={sound} onSound={() => setSound((s) => !s)}
           fs={fs} onFs={toggleFs} onShare={share} onThumbs={() => setThumbs(true)} embed={false} accent="#204262" />
       </div>
+      <Sheet open={contents} onOpenChange={setContents}>
+        <SheetContent side="bottom" className="lib bg-[#0f1f33] border-white/10 h-[75vh] text-white p-0">
+          <div className="h-full overflow-y-auto lib-scroll px-6 pt-8 pb-6">
+            <IssuePanel item={item} onGo={(p) => { const r = flipRef.current?.go(p); if (r != null) setPage(r); setContents(false); }} onStart={() => { flipRef.current?.next(); setContents(false); }} />
+          </div>
+        </SheetContent>
+      </Sheet>
       <Sheet open={thumbs} onOpenChange={setThumbs}>
         <SheetContent side="bottom" className="bg-[#0f1f33] border-white/10 max-h-[60vh] text-white">
           <SheetHeader><SheetTitle className="text-white font-normal">{item.label}, all pages</SheetTitle></SheetHeader>
@@ -369,6 +478,7 @@ export default function Library({ embed = false }) {
   const [startPage, setStartPage] = useState(0);
   const [searchSheet, setSearchSheet] = useState(false);
   const hero = useTilt(7);
+  const mobile = useIsMobile();
   const focusTimer = useRef(0);
 
   useEffect(() => {
@@ -418,12 +528,17 @@ export default function Library({ embed = false }) {
           {brand.website ? <a href={brand.website} target="_blank" rel="noopener noreferrer" className="shrink-0">{logo}</a> : <span className="shrink-0">{logo}</span>}
           <span className="w-px h-6 bg-white/20" aria-hidden="true" />
           <button onClick={back} className="text-[16px] sm:text-[17px] font-normal tracking-[-0.01em] truncate hover:text-white text-white/90" data-testid="library-title">{lib.title}</button>
-          <div className="ml-auto flex items-center gap-2">
+          {items.length > 1 && (
+            <Barcode className="hidden md:flex ml-auto mr-2" count={items.length} height={20}
+              active={items.findIndex((x) => x.flipbook_id === (open || featured)?.flipbook_id)}
+              onPick={(i) => (open ? openIssue(items[i], 0) : setFocus(items[i]))} labels={items.map((x) => (x.special ? `${x.kind}, ${x.label}` : x.label))} />
+          )}
+          <div className={`${items.length > 1 ? "md:ml-0" : ""} ml-auto flex items-center gap-2`}>
             {open && <button onClick={back} className="h-9 px-4 rounded-full text-[14px] text-white/80 hover:bg-white/10 flex items-center gap-2" data-testid="library-back"><ArrowLeft className="w-4 h-4" /><span className="hidden sm:inline">All issues</span></button>}
             {items.length > 0 && <button onClick={() => setSearchSheet(true)} className="xl:hidden h-9 w-9 grid place-items-center rounded-full hover:bg-white/10" aria-label="Search"><Search className="w-4 h-4" /></button>}
           </div>
         </div>
-        {brand.stripe ? <img src={fileUrl(brand.stripe)} alt="" className="h-[5px] w-full object-cover object-left opacity-30 brightness-0 invert" aria-hidden="true" /> : <div className="h-px bg-white/10" />}
+        {brand.stripe ? <div className="h-[8px] w-full opacity-40 brightness-0 invert" style={{ backgroundImage: `url(${fileUrl(brand.stripe)})`, backgroundRepeat: "repeat-x", backgroundSize: "auto 100%" }} aria-hidden="true" /> : <div className="h-px bg-white/10" />}
       </header>
 
       {/* body */}
@@ -435,6 +550,10 @@ export default function Library({ embed = false }) {
               <h1 className="mt-2 text-[clamp(32px,4vw,48px)] font-light leading-tight tracking-[-0.02em]">No issues published yet</h1>
               <p className="mt-4 text-[15px] text-white/60 leading-relaxed">Issues appear here as soon as they're added to this library.</p>
             </div>
+          </main>
+        ) : !open && mobile ? (
+          <main className="min-h-0 overflow-y-auto lib-noscroll">
+            <MobileBrowse items={items} latest={latest} onOpen={(x) => openIssue(x, 0)} onActive={setFocus} />
           </main>
         ) : !open ? (
           <main className="min-h-0 overflow-y-auto lib-scroll" data-testid="library-browse">
