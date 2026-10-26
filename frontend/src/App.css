@@ -19,7 +19,16 @@
   background: #fff;
   overflow: hidden;
 }
-.fc-page.fc-blank { background: var(--fc-blank, #0d1320); box-shadow: none !important; }
+.fc-page.fc-blank { background: var(--fc-inside, #0d1320); box-shadow: none !important; }
+/* the inside of the covers: a dark board, the same whether mid-turn or at rest */
+.fc-inside { background: var(--fc-inside, #0d1320); }
+.fc-inside-left { border-radius: 8px 0 0 8px; box-shadow: -8px 10px 24px rgba(0, 0, 0, 0.35); }
+.fc-inside-right { border-radius: 0 8px 8px 0; box-shadow: 8px 10px 24px rgba(0, 0, 0, 0.35); }
+.fc-blank-inner, .fc-blank-inner > div { position: absolute; inset: 0; }
+.fc-blank-inner > div { display: none; pointer-events: none; }
+.fc-blank[data-side="left"] .fc-blank-left, .fc-blank[data-side="right"] .fc-blank-right { display: block; }
+/* while turning to a cover, the page underneath has no paper edges to show */
+.fc-to-cover .stf__item.--left, .fc-to-back .stf__item.--right { box-shadow: none !important; }
 .fc-media-hover {
   transition: transform 260ms cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 260ms ease;
   transform-origin: center;
@@ -128,7 +137,7 @@
   --steel: #44546a;
   --mist: #9db8d4;
   --paper: #f4f6f8;
-  --fc-blank: #0b1729;
+  --fc-inside: linear-gradient(90deg, #0f2236, #132b45);
   font-family: Roboto, system-ui, sans-serif;
   background: var(--ink);
   color: #fff;
@@ -267,6 +276,9 @@
 /* phone month / year wheels */
 .lib-wheel { -webkit-mask-image: linear-gradient(180deg, transparent, #000 30%, #000 70%, transparent); mask-image: linear-gradient(180deg, transparent, #000 30%, #000 70%, transparent); overscroll-behavior: contain; }
 .lib-wheel-band { position: absolute; left: 8%; right: 8%; top: 50%; height: 46px; transform: translateY(-50%); border-radius: 12px; background: rgba(255,255,255,0.05); border-top: 1px solid rgba(157,184,212,0.18); border-bottom: 1px solid rgba(157,184,212,0.18); pointer-events: none; }
+
+/* add-to-home-screen card */
+.lib-install { animation: lib-drop 520ms cubic-bezier(0.32, 0.72, 0, 1) both; padding-bottom: env(safe-area-inset-bottom); }
 
 /* dock rail */
 .lib-dock-item { transition: transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1), margin 220ms; transform-origin: left center; }

@@ -67,32 +67,38 @@ export function blankEdges(pf) {
   if (!pc || pc.__blankEdges) return;
   pc.__blankEdges = true;
   const orig = pc.getBottomPage.bind(pc);
+  const first = pc.getPages()[0];
+  const host = first?.getElement?.().parentElement;
   let blank = null;
-  const sheet = () => {
-    if (blank) return blank;
-    const first = pc.getPages()[0];
-    const host = first?.getElement?.().parentElement;
-    if (!host) return null;
+  if (host) {
     const el = document.createElement("div");
     el.className = "fc-page fc-blank";
-    el.style.display = "none";
+    el.style.cssText = "display: none";
     host.appendChild(el);
     blank = new first.constructor(pf.getRender(), el, "soft");
     blank.load();
-    return blank;
-  };
+    pc.__blankEl = el;
+  }
   pc.getBottomPage = (direction) => {
     try {
-      if (pf.getOrientation() === "landscape") {
+      if (blank && pf.getOrientation() === "landscape") {
         const spreads = pc.getSpread();
         const cur = pc.currentSpreadIndex;
         const target = direction === 0 ? spreads[cur + 1] : spreads[cur - 1]; // 0 = FORWARD
-        if (target && target.length === 1) return sheet() || orig(direction);
+        if (target && target.length === 1) {
+          // which inside cover is being uncovered, so the page can show what will be there
+          blank.getElement().dataset.side = direction === 0 ? "right" : "left";
+          host.classList.add(direction === 0 ? "fc-to-back" : "fc-to-cover");
+          return blank;
+        }
       }
     } catch { /* fall back to the library's choice */ }
     return orig(direction);
   };
-  const hide = () => { if (blank) blank.getElement().style.cssText = "display: none"; };
+  const hide = () => {
+    if (blank) blank.getElement().style.cssText = "display: none";
+    host?.classList.remove("fc-to-cover", "fc-to-back");
+  };
   pf.on("changeState", (e) => e.data === "read" && hide());
   pf.on("flip", hide);
 }

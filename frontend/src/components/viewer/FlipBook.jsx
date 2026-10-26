@@ -28,6 +28,8 @@ export const FlipBook = forwardRef(({ book, accent, onFlip, onReady, onTurnStart
       // book geometry inside the stage, used to fill the empty half next to a closed cover
       rect: () => { try { return pfRef.current?.getRender().getRect(); } catch { return null; } },
       orientation: () => pfRef.current?.getOrientation(),
+      // the sheet shown while uncovering an inside cover (see blankEdges)
+      blank: () => { try { return pfRef.current?.getPageCollection()?.__blankEl || null; } catch { return null; } },
     };
   });
 

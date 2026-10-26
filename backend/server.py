@@ -1,5 +1,5 @@
 from fastapi import FastAPI, APIRouter, UploadFile, File, Form, Header, HTTPException, BackgroundTasks, Request, Depends
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -833,6 +833,85 @@ async def share_page(slug: str, request: Request, issue: str = "", page: int = 0
 </head><body><p><a href="{e(target)}">Open {e(view['title'])}</a></p>
 <script>location.replace({json.dumps(target)})</script></body></html>"""
     return HTMLResponse(body)
+
+
+# ---------------------------------------------------------------- add to home screen
+# Each library can be saved to a phone's home screen as its own app: a manifest
+# for Android/Chrome and a square brand icon (also used as the iPhone icon).
+icon_cache: Dict[str, bytes] = {}
+
+
+def make_icon(logo_file: Optional[Path], color: str, size: int) -> bytes:
+    from PIL import Image
+    import io
+    hexv = (color or "#204262").lstrip("#")
+    try:
+        bg = tuple(int(hexv[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        bg = (32, 66, 98)
+    img = Image.new("RGBA", (size, size), bg + (255,))
+    if logo_file and logo_file.exists():
+        try:
+            logo = Image.open(logo_file).convert("RGBA")
+            alpha = logo.getchannel("A")
+            white = Image.new("RGBA", logo.size, (255, 255, 255, 255))
+            white.putalpha(alpha)  # logo drawn in white, like the library header
+            box = int(size * 0.62)  # stays inside the safe zone of round/maskable icons
+            white.thumbnail((box, box), Image.LANCZOS)
+            img.alpha_composite(white, ((size - white.width) // 2, (size - white.height) // 2))
+        except Exception:
+            pass
+    out = io.BytesIO()
+    img.convert("RGB").save(out, "PNG", optimize=True)
+    return out.getvalue()
+
+
+@api.get("/icon/{slug}/{size}.png")
+async def library_icon(slug: str, size: int):
+    if size not in (180, 192, 512):
+        raise HTTPException(status_code=404, detail="Icon not found")
+    lib = await db.libraries.find_one({"slug": slug, "is_deleted": False}, {"_id": 0, "owner_hash": 1})
+    if not lib:
+        raise HTTPException(status_code=404, detail="Library not found")
+    brand = await get_brand(lib["owner_hash"]) or {}
+    key = f"{slug}:{size}:{brand.get('logo', '')}:{brand.get('color', '')}"
+    if key not in icon_cache:
+        local = None
+        if brand.get("logo"):
+            local = CACHE_DIR / hashlib.sha1(brand["logo"].encode()).hexdigest()
+            if not local.exists():
+                try:
+                    await asyncio.to_thread(download_to, brand["logo"], local)
+                except Exception:
+                    local = None
+        icon_cache[key] = await asyncio.to_thread(make_icon, local, brand.get("color") or "#204262", size)
+    return Response(icon_cache[key], media_type="image/png", headers={"Cache-Control": "public, max-age=86400"})
+
+
+@api.get("/manifest/{slug}.webmanifest")
+async def library_manifest(slug: str, request: Request):
+    lib = await db.libraries.find_one({"slug": slug, "is_deleted": False}, {"_id": 0, "owner_hash": 1, "title": 1})
+    if not lib:
+        raise HTTPException(status_code=404, detail="Library not found")
+    brand = await get_brand(lib["owner_hash"]) or {}
+    name = brand.get("name") or ""
+    short = "".join(w[0] for w in re.findall(r"[A-Z][a-z]*", name.replace("LLP", "")) if w)[:4]
+    base = str(request.base_url).rstrip("/")
+    if request.headers.get("x-forwarded-proto") == "https":
+        base = base.replace("http://", "https://", 1)
+    words = lib["title"].split()
+    manifest = {
+        "name": f"{short} {lib['title']}".strip() if short else lib["title"],
+        "short_name": (words[-1] if len(lib["title"]) > 12 else lib["title"])[:12],
+        "start_url": f"{FRONTEND_URL}/library/{slug}",
+        "scope": f"{FRONTEND_URL}/library/{slug}",
+        "id": f"{FRONTEND_URL}/library/{slug}",
+        "display": "standalone",
+        "background_color": "#0a1626",
+        "theme_color": "#0a1626",
+        "icons": [{"src": f"{base}/api/icon/{slug}/{n}.png", "sizes": f"{n}x{n}", "type": "image/png", "purpose": "any maskable"} for n in (192, 512)],
+    }
+    return JSONResponse(manifest, media_type="application/manifest+json")
 
 
 # ---------------------------------------------------------------- subscribers (leads)

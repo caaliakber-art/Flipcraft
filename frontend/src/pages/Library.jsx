@@ -711,7 +711,7 @@ function MobileBrowse({ items, latest, onOpen, onActive, tagline }) {
 /* ------------------------------------------------------------------ reader */
 function IssuePanel({ item, onGo, onStart }) {
   return (
-    <div className="h-full flex flex-col justify-center pr-6 sm:pr-10 pl-2 lib-swap">
+    <div className="h-full flex flex-col justify-center px-7 sm:px-10">
       <p className="text-[14px] text-white/55">{item.special ? item.kind : "In this issue"}</p>
       <h2 className="text-[clamp(28px,3.2vw,44px)] font-light leading-[1.05] mt-1">{item.label}</h2>
       {item.toc?.length > 0 ? (
@@ -742,7 +742,7 @@ function IssuePanel({ item, onGo, onStart }) {
 
 function NextPanel({ next, onOpen, onBack, onSubscribe, subscribed }) {
   return (
-    <div className="h-full flex flex-col justify-center pl-8 sm:pl-12 lib-swap">
+    <div className="h-full flex flex-col justify-center px-8 sm:px-12">
       {next ? (
         <>
           <p className="text-[14px] text-white/55">Next issue</p>
@@ -777,6 +777,7 @@ function Reader({ slug, item, items, startPage, embed, onOpen, onBack, onPage, o
   const [rect, setRect] = useState(null);
   const [seen, setSeen] = useState(() => new Set([0]));
   const [contents, setContents] = useState(false);
+  const [sheet, setSheet] = useState(null);
   const flipRef = useRef(null);
   const rootRef = useRef(null);
   const soundRef = useRef(true);
@@ -837,6 +838,7 @@ function Reader({ slug, item, items, startPage, embed, onOpen, onBack, onPage, o
       if (pending.current) { const p = flipRef.current?.go(pending.current); if (p != null) setPage(p); pending.current = 0; }
       measure();
       announce();
+      setSheet(flipRef.current?.blank?.() || null);
     }, 60);
   }, [measure, announce]);
 
@@ -857,13 +859,20 @@ function Reader({ slug, item, items, startPage, embed, onOpen, onBack, onPage, o
         <div className="m-auto shrink-0 p-3 sm:p-6 relative" style={{ width: `${zoom * 100}%`, height: `${zoom * 100}%` }}>
           <div className="relative w-full h-full">
             <FlipBook key={book.id} ref={flipRef} book={book} accent="#9db8d4" onFlip={onFlip} onReady={onReady} onTurnStart={onTurnStart} />
+            {/* What sits inside each cover is painted onto the sheet page-flip reveals while a
+                page is lifted, so it is already there mid-turn, then stays put when the turn ends. */}
+            {sheet && !portrait && createPortal(
+              <div className="fc-blank-inner">
+                <div className="fc-blank-left"><IssuePanel item={item} onGo={() => {}} onStart={() => {}} /></div>
+                <div className="fc-blank-right"><NextPanel next={next} onOpen={() => {}} onBack={() => {}} onSubscribe={() => {}} subscribed={subscribed} /></div>
+              </div>, sheet)}
             {blankLeft && (
-              <div className="absolute" style={{ left: rect.left, top: rect.top, width: rect.pageWidth, height: rect.height }}>
+              <div className="absolute fc-inside fc-inside-left" style={{ left: rect.left, top: rect.top, width: rect.pageWidth, height: rect.height }}>
                 <IssuePanel item={item} onGo={(p) => { const r = flipRef.current?.go(p); if (r != null) setPage(r); setTimeout(measure, 60); }} onStart={() => flipRef.current?.next()} />
               </div>
             )}
             {blankRight && (
-              <div className="absolute" style={{ left: rect.left + rect.pageWidth, top: rect.top, width: rect.pageWidth, height: rect.height }}>
+              <div className="absolute fc-inside fc-inside-right" style={{ left: rect.left + rect.pageWidth, top: rect.top, width: rect.pageWidth, height: rect.height }}>
                 <NextPanel next={next} onOpen={(it) => onOpen(it, 0)} onBack={onBack} onSubscribe={onSubscribe} subscribed={subscribed} />
               </div>
             )}
@@ -923,8 +932,9 @@ function DockRail({ items, current, onOpen }) {
   const leave = () => { setTip(null); ref.current?.querySelectorAll("[data-dock]").forEach((el) => { el.style.transform = ""; el.style.marginBlock = ""; }); };
   const show = (it, el) => { const r = el.getBoundingClientRect(); setTip({ it, top: r.top + r.height / 2 }); };
   useEffect(() => {
-    const el = ref.current?.querySelector('[aria-current="true"]');
-    el?.scrollIntoView({ block: "center", behavior: "smooth" });
+    // scroll only the rail itself; scrollIntoView would also scroll the page and hide the header
+    const nav = ref.current, el = nav?.querySelector('[aria-current="true"]');
+    if (nav && el) nav.scrollTo({ top: el.offsetTop - nav.clientHeight / 2 + el.offsetHeight / 2, behavior: reduceMotion() ? "auto" : "smooth" });
   }, [current]);
   return (
     <>
@@ -951,6 +961,72 @@ function DockRail({ items, current, onOpen }) {
         </div>, document.body
       )}
     </>
+  );
+}
+
+/* ------------------------------------------------------------------ add to home screen
+   On phones, offer to save the library as an app icon. Android/Chrome gets a real
+   one-tap install; iPhone needs Share > Add to Home Screen, so we show those steps. */
+function InstallPrompt({ slug, lib, embed }) {
+  const [deferred, setDeferred] = useState(null);
+  const [show, setShow] = useState(false);
+  const [done, setDone] = useState(false);
+  const key = `flipcraft_install_${slug}`;
+  const title = `${shortName(lib.brand?.name) ? shortName(lib.brand?.name) + " " : ""}${lib.title.split(" ").slice(-1)[0]}`;
+  useEffect(() => {
+    const head = document.head;
+    const add = (tag, attrs) => { const el = document.createElement(tag); Object.entries(attrs).forEach(([k, v]) => el.setAttribute(k, v)); el.dataset.lib = "1"; head.appendChild(el); return el; };
+    add("link", { rel: "manifest", href: `${API}/manifest/${slug}.webmanifest`, crossorigin: "anonymous" });
+    add("link", { rel: "apple-touch-icon", href: `${API}/icon/${slug}/180.png` });
+    add("meta", { name: "apple-mobile-web-app-capable", content: "yes" });
+    add("meta", { name: "mobile-web-app-capable", content: "yes" });
+    add("meta", { name: "apple-mobile-web-app-title", content: title });
+    add("meta", { name: "apple-mobile-web-app-status-bar-style", content: "black-translucent" });
+    add("meta", { name: "theme-color", content: "#0a1626" });
+    if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
+    const onPrompt = (e) => { e.preventDefault(); setDeferred(e); };
+    window.addEventListener("beforeinstallprompt", onPrompt);
+    window.addEventListener("appinstalled", () => setDone(true));
+    return () => { window.removeEventListener("beforeinstallprompt", onPrompt); head.querySelectorAll("[data-lib]").forEach((n) => n.remove()); };
+  }, [slug, title]);
+  useEffect(() => {
+    const standalone = window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone;
+    const phone = window.matchMedia("(max-width: 820px) and (pointer: coarse)").matches;
+    let snoozed = false;
+    try { snoozed = Number(localStorage.getItem(key) || 0) > Date.now(); } catch { /* private mode */ }
+    if (embed || standalone || !phone || snoozed) return;
+    const t = setTimeout(() => setShow(true), 6000);
+    return () => clearTimeout(t);
+  }, [embed, key]);
+  const later = () => { setShow(false); try { localStorage.setItem(key, String(Date.now() + 21 * 864e5)); } catch { /* private mode */ } };
+  if (!show || done) return null;
+  const ios = /iPhone|iPad|iPod/i.test(navigator.userAgent);
+  const install = async () => { deferred.prompt(); const r = await deferred.userChoice.catch(() => null); setDeferred(null); if (r?.outcome === "accepted") setDone(true); else later(); };
+  const shareGlyph = <svg viewBox="0 0 24 24" className="inline w-[18px] h-[18px] -mt-1 mx-0.5 stroke-current fill-none" strokeWidth="1.8" aria-label="Share"><path d="M12 3v12M8 7l4-4 4 4M6 11H5a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-8a1 1 0 0 0-1-1h-1" /></svg>;
+  return (
+    <div className="fixed inset-x-3 bottom-3 z-[70] lib-install" role="dialog" aria-label="Add to home screen" data-testid="install-prompt">
+      <div className="lib-glass bg-[#0f1f33]/95 rounded-3xl p-4 shadow-2xl">
+        <div className="flex items-center gap-3.5">
+          <img src={`${API}/icon/${slug}/192.png`} alt="" className="w-12 h-12 rounded-[13px] shadow-lg shrink-0" />
+          <div className="min-w-0 flex-1">
+            <p className="text-[15.5px] font-medium leading-tight">Add {lib.title} to your home screen</p>
+            <p className="text-[13px] text-white/60 leading-snug mt-0.5">One tap to every issue, like an app.</p>
+          </div>
+          <button onClick={later} className="w-8 h-8 grid place-items-center rounded-full text-white/60 shrink-0 -mt-5" aria-label="Not now"><X className="w-4 h-4" /></button>
+        </div>
+        {deferred ? (
+          <div className="mt-3.5 flex gap-2">
+            <button onClick={later} className="flex-1 h-11 rounded-full bg-white/[0.08] text-[14.5px]">Not now</button>
+            <button onClick={install} className="flex-1 h-11 rounded-full bg-white text-[color:var(--ink)] text-[14.5px] font-medium" data-testid="install-add">Add</button>
+          </div>
+        ) : (
+          <p className="mt-3 rounded-2xl bg-black/25 px-3.5 py-3 text-[14px] text-white/85 leading-relaxed">
+            {ios ? <>Tap {shareGlyph} <b className="font-medium">Share</b> {/CriOS/i.test(navigator.userAgent) ? "at the top" : "at the bottom of Safari"}, then <b className="font-medium">Add to Home Screen</b>.</>
+              : <>Open your browser menu <b className="font-medium">⋮</b>, then tap <b className="font-medium">Add to Home screen</b>.</>}
+          </p>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -1309,6 +1385,7 @@ export default function Library({ embed = false }) {
       )}
 
       {subOpen && <SubscribeDialog slug={slug} lib={lib} topics={topics} issue={open} credentials={subOpen === "credentials"} onClose={() => setSubOpen(false)} onDone={() => setSubscribed(true)} />}
+      <InstallPrompt slug={slug} lib={lib} embed={embed} />
       {shareOf && <ShareSheet slug={slug} lib={lib} item={shareOf.item} page={shareOf.page} onClose={() => setShareOf(null)} />}
     </div>
   );
