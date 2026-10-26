@@ -210,6 +210,11 @@ function SearchPanel({ slug, lib, current, readPage, onOpen, onClose, autoFocus 
   const inputRef = useRef(null);
   const suggestions = useSuggestions(lib);
   useEffect(() => { if (autoFocus) setTimeout(() => inputRef.current?.focus(), 50); }, [autoFocus]);
+  useEffect(() => {
+    const f = () => { inputRef.current?.focus(); inputRef.current?.select(); };
+    window.addEventListener("lib-ask-focus", f);
+    return () => window.removeEventListener("lib-ask-focus", f);
+  }, []);
 
   useEffect(() => {
     if (!current || readPage == null) { setRelated(null); return; }
@@ -238,7 +243,7 @@ function SearchPanel({ slug, lib, current, readPage, onOpen, onClose, autoFocus 
         </div>
         <label className="relative block">
           <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-white/50" />
-          <input ref={inputRef} value={q} onChange={(e) => setQ(e.target.value)} placeholder="Ask about GSTAT, TDS, FEMA..."
+          <input ref={inputRef} value={q} onChange={(e) => setQ(e.target.value)} placeholder="Ask about GSTAT, TDS, FEMA...  ( / )"
             onKeyDown={(e) => e.key === "Escape" && (q ? setQ("") : onClose?.())}
             className="w-full h-11 rounded-xl bg-black/25 border border-white/10 pl-10 pr-9 text-[15px] placeholder:text-white/40 focus:outline-none focus:border-[color:var(--mist)] focus:bg-black/35 transition-colors"
             data-testid="library-search-input" />
@@ -621,7 +626,8 @@ function Wheel({ options, index, onPick, row = 52, className = "", align = "cent
    year wheels underneath to jump straight to an issue. */
 const yearKey = (it) => (undated(it) ? "More" : yearOf(it));
 const wheelLabel = (it) => (undated(it) ? it.label : it.special ? (it.kind || "Special").replace(/\s*edition$/i, "") : monthOf(it));
-function MobileBrowse({ items, latest, onOpen, onActive, tagline }) {
+function MobileBrowse({ items, latest, onOpen, onActive, tagline, pitch, onSubscribe }) {
+  const touch = useRef(null);
   const ref = useRef(null);
   const raf = useRef(0);
   const cur = useRef(0);
@@ -698,8 +704,16 @@ function MobileBrowse({ items, latest, onOpen, onActive, tagline }) {
   const inYear = useMemo(() => items.map((x, i) => [x, i]).filter(([x]) => yearKey(x) === yk), [items, yk]);
   const monthPos = inYear.findIndex(([, i]) => i === sel);
   return (
-    <div className="flex flex-col pb-6" data-testid="library-mobile">
-      <div ref={ref} onScroll={onCarousel} onTouchStart={stopAnim} onPointerDown={stopAnim}
+    <div className="flex flex-col pb-6" data-testid="library-mobile"
+      onTouchStart={(e) => { if (e.target.closest("[data-carousel]")) { touch.current = null; return; } const t = e.touches[0]; touch.current = { x: t.clientX, y: t.clientY }; }}
+      onTouchEnd={(e) => {
+        // a sideways swipe anywhere (not only on the covers) moves to the next or previous issue
+        const s0 = touch.current; touch.current = null;
+        if (!s0) return;
+        const t = e.changedTouches[0], dx = t.clientX - s0.x, dy = t.clientY - s0.y;
+        if (Math.abs(dx) > 45 && Math.abs(dx) > Math.abs(dy) * 1.6) pick(Math.max(0, Math.min(items.length - 1, sel + (dx < 0 ? 1 : -1))));
+      }}>
+      <div ref={ref} data-carousel onScroll={onCarousel} onTouchStart={stopAnim} onPointerDown={stopAnim}
         className="lib-noscroll flex overflow-x-auto pt-4 pb-2" style={{ scrollSnapType: "x mandatory", paddingInline: "calc(50vw - min(23vw, 110px))" }}>
         {items.map((x, i) => (
           <div key={x.flipbook_id} className="shrink-0 w-[46vw] max-w-[220px] px-1.5" style={{ scrollSnapAlign: "center" }}>
@@ -726,8 +740,21 @@ function MobileBrowse({ items, latest, onOpen, onActive, tagline }) {
             ) : null}
           </div>
           <button onClick={() => onOpen(it, ref.current?.children[sel]?.querySelector(".lib-cover"))} className="mt-3 h-12 px-8 rounded-full bg-white text-[color:var(--ink)] text-[15px] font-medium active:scale-[0.98] transition" data-testid="mobile-read">Read {it.special ? "edition" : monthOf(it)}</button>
-          <p className="lib-cond mt-3 text-[12.5px] text-white/45">{it.page_count} pages. Swipe the covers, or spin the month or year.</p>
+          <p className="lib-cond mt-3 text-[12.5px] text-white/45">{it.page_count} pages. Swipe sideways, or spin the month or year.</p>
         </div>
+      )}
+      {pitch?.title && (
+        <section className="mx-4 mt-10 pt-8 border-t border-[rgba(157,184,212,0.18)] text-center" data-testid="pitch-mobile">
+          <Barcode count={5} active={2} height={18} className="justify-center" />
+          <h2 className="mt-4 text-[30px] font-light leading-[1.08] tracking-[-0.02em]">{pitch.title}</h2>
+          {pitch.text && <p className="mt-3 text-[15px] font-light text-white/70 leading-relaxed">{pitch.text}</p>}
+          {onSubscribe && (
+            <>
+              <button onClick={onSubscribe} className="mt-6 h-12 px-7 rounded-full bg-white/[0.12] border border-white/20 text-[15px] active:scale-[0.98] transition" data-testid="pitch-mobile-subscribe">Get it every month</button>
+              <p className="mt-2 text-[12.5px] text-white/45">Free. One issue a month.</p>
+            </>
+          )}
+        </section>
       )}
     </div>
   );
@@ -1115,11 +1142,18 @@ export default function Library({ embed = false }) {
   }, [open, spot, openSpot, closeSpot]);
   useEffect(() => {
     const k = (e) => {
-      if (e.key === "/" && !/INPUT|TEXTAREA/.test(document.activeElement?.tagName || "")) { e.preventDefault(); toggleAsk(); }
+      if (e.key !== "/" || /INPUT|TEXTAREA/.test(document.activeElement?.tagName || "")) return;
+      e.preventDefault();
+      if (open && isWide()) {
+        // straight into the search box: open the panel if needed, never close it
+        const wasOpen = askOpen;
+        setAskOpen(true);
+        setTimeout(() => window.dispatchEvent(new Event("lib-ask-focus")), wasOpen ? 0 : 380);
+      } else toggleAsk();
     };
     window.addEventListener("keydown", k);
     return () => window.removeEventListener("keydown", k);
-  }, [toggleAsk]);
+  }, [toggleAsk, open, askOpen]);
 
   // The side panel slides; the book re-fits on every frame of the slide instead of jumping at the end.
   useEffect(() => {
@@ -1282,7 +1316,8 @@ export default function Library({ embed = false }) {
           ) : !open && mobile ? (
             <main className={`min-h-0 overflow-y-auto lib-noscroll transition-opacity duration-300 ${leaving ? "opacity-0" : ""}`}>
               <TopicBar topics={topics} topic={topic} onTopic={pickTopic} total={items.length} className="px-4 pt-4" />
-              <MobileBrowse items={shown} latest={latest} onOpen={(x, el) => fly(x, el)} onActive={setFocus} tagline={lib.pitch_title} />
+              <MobileBrowse items={shown} latest={latest} onOpen={(x, el) => fly(x, el)} onActive={setFocus} tagline={lib.pitch_title}
+                pitch={{ title: lib.pitch_title, text: lib.pitch_text }} onSubscribe={subscribed ? null : () => setSubOpen("subscribe")} />
             </main>
           ) : !open ? (
             <main ref={browseRef} className={`min-h-0 overflow-y-auto lib-scroll transition-[opacity,filter] duration-300 ${leaving ? "opacity-0 blur-[2px]" : ""}`} data-testid="library-browse">
