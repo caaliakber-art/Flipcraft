@@ -28,15 +28,17 @@ db = client[os.environ['DB_NAME']]
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Cloudflare R2 (S3-compatible) storage
-R2_ACCOUNT_ID = os.environ.get("R2_ACCOUNT_ID", "")
-R2_BUCKET = os.environ.get("R2_BUCKET", "flipcraft")
-r2 = boto3.client(
+# S3-compatible storage (Backblaze B2 by default; works with Cloudflare R2 too)
+# B2 endpoint looks like https://s3.us-west-004.backblazeb2.com and its region is the middle part (us-west-004)
+S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
+S3_REGION = os.environ.get("S3_REGION") or (re.search(r"s3\.([a-z0-9-]+)\.backblazeb2\.com", S3_ENDPOINT) or [None, "auto"])[1]
+S3_BUCKET = os.environ.get("S3_BUCKET", "flipcraft")
+store = boto3.client(
     "s3",
-    endpoint_url=f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com",
-    aws_access_key_id=os.environ.get("R2_ACCESS_KEY_ID"),
-    aws_secret_access_key=os.environ.get("R2_SECRET_ACCESS_KEY"),
-    region_name="auto",
+    endpoint_url=S3_ENDPOINT or None,
+    aws_access_key_id=os.environ.get("S3_KEY_ID"),
+    aws_secret_access_key=os.environ.get("S3_SECRET_KEY"),
+    region_name=S3_REGION,
     config=BotoConfig(signature_version="s3v4", retries={"max_attempts": 3, "mode": "standard"}),
 )
 APP_NAME = "flipcraft"
@@ -51,13 +53,13 @@ VIDEO_TYPES = {"video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov
 
 
 def put_object(path: str, data: bytes, content_type: str) -> dict:
-    r2.put_object(Bucket=R2_BUCKET, Key=path, Body=data, ContentType=content_type)
+    store.put_object(Bucket=S3_BUCKET, Key=path, Body=data, ContentType=content_type)
     return {"path": path, "size": len(data)}
 
 
 def download_to(path: str, dest: Path):
     tmp = dest.with_suffix(f".{uuid.uuid4().hex}.part")
-    r2.download_file(R2_BUCKET, path, str(tmp))
+    store.download_file(S3_BUCKET, path, str(tmp))
     tmp.rename(dest)
 
 
@@ -417,10 +419,10 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup():
     try:
-        await asyncio.to_thread(r2.head_bucket, Bucket=R2_BUCKET)
-        logger.info(f"R2 storage ready (bucket: {R2_BUCKET})")
+        await asyncio.to_thread(store.head_bucket, Bucket=S3_BUCKET)
+        logger.info(f"Storage ready (bucket: {S3_BUCKET})")
     except Exception as e:
-        logger.error(f"R2 storage check failed: {e}")
+        logger.error(f"Storage check failed: {e}")
     await db.flipbooks.create_index("id", unique=True)
     await db.flipbooks.create_index("owner_hash")
     await db.files.create_index("storage_path")
