@@ -34,7 +34,7 @@ services:
     staticPublishPath: build
     envVars:
       - key: REACT_APP_BACKEND_URL
-        value: https://flipcraft-api.onrender.com
+        value: https://flipcraft-api-sg.onrender.com
       - key: NODE_VERSION
         value: "22"
     routes:
