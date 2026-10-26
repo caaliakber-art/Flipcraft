@@ -1,5 +1,5 @@
 from fastapi import FastAPI, APIRouter, UploadFile, File, Form, Header, HTTPException, BackgroundTasks, Request, Depends
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -10,6 +10,7 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
@@ -603,6 +604,9 @@ class LibraryUpdate(BaseModel):
     title: Optional[str] = Field(None, min_length=1, max_length=120)
     subtitle: Optional[str] = Field(None, max_length=300)
     items: Optional[List[LibraryItem]] = Field(None, max_length=500)
+    pitch_title: Optional[str] = Field(None, max_length=80)
+    pitch_text: Optional[str] = Field(None, max_length=400)
+    offer_credentials: Optional[bool] = None
 
 
 class AddItem(BaseModel):
@@ -643,7 +647,9 @@ async def library_view(lib: dict, public: bool) -> dict:
     brand = await get_brand(lib["owner_hash"])
     return {"id": lib["id"], "slug": lib["slug"], "title": lib["title"], "subtitle": lib.get("subtitle", ""),
             "items": items, "brand": Brand(**brand).model_dump() if brand else Brand().model_dump(),
-            "show_badge": not plan["remove_badge"], "updated_at": lib.get("updated_at", lib["created_at"])}
+            "show_badge": not plan["remove_badge"], "updated_at": lib.get("updated_at", lib["created_at"]),
+            "pitch_title": lib.get("pitch_title", ""), "pitch_text": lib.get("pitch_text", ""),
+            "offer_credentials": bool(lib.get("offer_credentials"))}
 
 
 @api.get("/libraries")
@@ -682,6 +688,12 @@ async def update_library(lid: str, body: LibraryUpdate, ohash: str = Depends(req
         changes["title"] = body.title.strip()
     if body.subtitle is not None:
         changes["subtitle"] = body.subtitle.strip()
+    for k in ("pitch_title", "pitch_text"):
+        v = getattr(body, k)
+        if v is not None:
+            changes[k] = v.strip()
+    if body.offer_credentials is not None:
+        changes["offer_credentials"] = body.offer_credentials
     if body.items is not None:
         mine = {b["id"] async for b in db.flipbooks.find({"id": {"$in": [i.flipbook_id for i in body.items]}, "owner_hash": ohash}, {"_id": 0, "id": 1})}
         changes["items"] = [i.model_dump() for i in body.items if i.flipbook_id in mine]
@@ -741,6 +753,11 @@ async def library_stats(lid: str, ohash: str = Depends(require_owner)):
                      "avg_pages": round(sum(len(r.get("pages", [])) for r in rs) / len(rs), 1) if rs else 0,
                      "avg_seconds": round(sum(r.get("seconds", 0) for r in rs) / len(rs)) if rs else 0,
                      "top_pages": [{"page": p, "views": n} for p, n in top]})
+    useful: Dict[str, int] = {}
+    async for r in db.reactions.find({"flipbook_id": {"$in": ids}}, {"_id": 0, "flipbook_id": 1}):
+        useful[r["flipbook_id"]] = useful.get(r["flipbook_id"], 0) + 1
+    for r in rows:
+        r["useful"] = useful.get(r["flipbook_id"], 0)
     rows.sort(key=lambda r: r["date"], reverse=True)
     all_readers = [r for rs in readers.values() for r in rs]
     return {
@@ -751,7 +768,71 @@ async def library_stats(lid: str, ohash: str = Depends(require_owner)):
         "regions": sorted(({"name": k, "views": n} for k, n in regions.items()), key=lambda r: -r["views"]),
         "items": rows,
         "subscribers": await db.subscribers.count_documents({"library_id": lid}),
+        "useful": sum(useful.values()),
     }
+
+
+# ---------------------------------------------------------------- "Was this useful?"
+class UsefulIn(BaseModel):
+    flipbook_id: str = Field(max_length=40)
+    visitor: str = Field(pattern=r"^[a-f0-9]{16,64}$")
+    on: bool = True
+
+
+@api.post("/public/libraries/{slug}/useful")
+async def mark_useful(slug: str, body: UsefulIn):
+    lib = await db.libraries.find_one({"slug": slug, "is_deleted": False}, {"_id": 0, "items": 1})
+    if not lib or body.flipbook_id not in {i["flipbook_id"] for i in lib.get("items", [])}:
+        raise HTTPException(status_code=404, detail="Issue not found")
+    key = {"flipbook_id": body.flipbook_id, "visitor": body.visitor}
+    if body.on:
+        await db.reactions.update_one(key, {"$setOnInsert": {"at": now_iso()}}, upsert=True)
+    else:
+        await db.reactions.delete_one(key)
+    return {"ok": True}
+
+
+# Share links point here so LinkedIn and WhatsApp show the issue's cover and title,
+# then the visitor is sent on to the library itself.
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://flipcraft.onrender.com").rstrip("/")
+
+
+@api.get("/share/{slug}")
+async def share_page(slug: str, request: Request, issue: str = "", page: int = 0):
+    import html as h
+    lib = await db.libraries.find_one({"slug": slug, "is_deleted": False}, {"_id": 0})
+    if not lib:
+        raise HTTPException(status_code=404, detail="Library not found")
+    view = await library_view(lib, public=True)
+    brand = view["brand"].get("name") or ""
+    it = next((i for i in view["items"] if i["flipbook_id"] == issue), None) or (view["items"][0] if view["items"] else None)
+    target = f"{FRONTEND_URL}/library/{slug}"
+    title = f"{view['title']}" + (f" | {brand}" if brand else "")
+    desc = view.get("pitch_text") or view.get("subtitle") or f"Every issue of {view['title']}, searchable in one place."
+    image = ""
+    if issue and it:
+        target += f"?issue={it['flipbook_id']}" + (f"&page={page}" if page > 1 else "")
+        name = f"{it['kind']}, {it['label']}" if it.get("special") and it.get("date") else it["label"]
+        title = f"{view['title']}: {name}" + (f" | {brand}" if brand else "")
+        heads = [s["section"] for s in (it.get("toc") or [])][:5]
+        if heads:
+            desc = "In this issue: " + ", ".join(heads) + "."
+    if it and it.get("cover"):
+        image = str(request.base_url).rstrip("/") + "/api/files/" + it["cover"]
+        if request.headers.get("x-forwarded-proto") == "https":
+            image = image.replace("http://", "https://", 1)
+    e = lambda v: h.escape(v, quote=True)
+    body = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>{e(title)}</title>
+<meta name="description" content="{e(desc)}">
+<meta property="og:type" content="article"><meta property="og:title" content="{e(title)}">
+<meta property="og:description" content="{e(desc)}"><meta property="og:url" content="{e(target)}">
+{f'<meta property="og:image" content="{e(image)}">' if image else ''}
+<meta name="twitter:card" content="summary_large_image">
+<meta http-equiv="refresh" content="0;url={e(target)}">
+</head><body><p><a href="{e(target)}">Open {e(view['title'])}</a></p>
+<script>location.replace({json.dumps(target)})</script></body></html>"""
+    return HTMLResponse(body)
 
 
 # ---------------------------------------------------------------- subscribers (leads)
@@ -764,6 +845,7 @@ class SubscribeIn(BaseModel):
     message: str = Field("", max_length=1000)
     issue: str = Field("", max_length=40)
     website: str = Field("", max_length=200)  # honeypot: people never see this field
+    wants_credentials: bool = False
 
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]{2,}$")
@@ -793,6 +875,8 @@ async def subscribe(slug: str, body: SubscribeIn, request: Request):
         if v:
             doc[k] = v
     upd = {"$set": doc, "$setOnInsert": {"id": uuid.uuid4().hex[:12], "owner_hash": lib["owner_hash"], "status": "new", "created_at": now_iso()}}
+    if body.wants_credentials:
+        doc["wants_credentials"] = True
     interests = [i.strip()[:60] for i in body.interests if i.strip()]
     if interests:
         upd["$addToSet"] = {"interests": {"$each": interests}}
@@ -1046,6 +1130,7 @@ async def startup():
     await db.libraries.create_index("slug", unique=True)
     await db.libraries.create_index("owner_hash")
     await db.subscribers.create_index([("library_id", 1), ("email", 1)], unique=True)
+    await db.reactions.create_index([("flipbook_id", 1), ("visitor", 1)], unique=True)
     await db.pagetext.create_index([("flipbook_id", 1), ("page", 1)], unique=True)
     try:
         await asyncio.to_thread(store.head_bucket, Bucket=S3_BUCKET)

@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useParams, useSearchParams } from "react-router-dom";
-import { ArrowLeft, BookOpen, Check, Loader2, MailPlus, Search, X } from "lucide-react";
+import { ArrowLeft, BookOpen, Check, Link2, Loader2, Mail, MailPlus, Search, Share2, ThumbsUp, X } from "lucide-react";
 import { toast } from "sonner";
 import { FlipBook } from "../components/viewer/FlipBook";
 import { ViewerToolbar } from "../components/viewer/ViewerToolbar";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "../components/ui/sheet";
-import { copyText, errMsg, fileUrl, publicApi, track } from "../lib/api";
+import { API, copyText, errMsg, fileUrl, publicApi, track, visitorId } from "../lib/api";
 import { playFlip } from "../lib/flipSound";
 
 const reduceMotion = () => typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
@@ -84,14 +84,14 @@ function useTilt(max = 9) {
   return { target, bind };
 }
 
-function Cover({ src, aspect = 0.707, width, reflect = false, coverRef, className = "", eager = false }) {
+function Cover({ src, aspect = 0.707, width, reflect = false, reflectClass = "", coverRef, className = "", eager = false }) {
   return (
     <div className={`relative ${className}`} style={{ width, aspectRatio: `${aspect}` }}>
       <div ref={coverRef} className="lib-cover w-full h-full">
         <img src={fileUrl(src)} alt="" draggable={false} loading={eager ? "eager" : "lazy"} />
         <span className="lib-glare" />
       </div>
-      {reflect && <div className="lib-reflect" style={{ backgroundImage: `url(${fileUrl(src)})` }} aria-hidden="true" />}
+      {reflect && <div className={`lib-reflect ${reflectClass}`} style={{ backgroundImage: `url(${fileUrl(src)})` }} aria-hidden="true" />}
     </div>
   );
 }
@@ -111,8 +111,8 @@ function ShelfCard({ item, onFocus, onOpen, focused, stacked = false }) {
       aria-label={`Open ${issueName(item)}`}
       data-testid={`shelf-${item.flipbook_id}`}
     >
-      <Cover src={item.thumb || item.cover} aspect={item.aspect} width="100%" coverRef={target} />
-      <div className={`pt-3 pr-2 transition-opacity duration-300 ${stacked ? "opacity-0" : "opacity-100"}`}>
+      <Cover src={item.thumb || item.cover} aspect={item.aspect} width="100%" coverRef={target} reflect={!stacked} reflectClass="lib-reflect-sm" />
+      <div className={`relative z-[1] pt-3 pr-2 transition-opacity duration-300 ${stacked ? "opacity-0" : "opacity-100"}`}>
         <div className={`text-[15px] leading-tight ${focused ? "text-white" : "text-white/75"} transition-colors`}>{special ? item.kind : monthOf(item)}</div>
         <div className="lib-cond text-[12px] text-white/45 mt-0.5 line-clamp-2">{special ? item.label : `${item.page_count} pages`}</div>
       </div>
@@ -365,17 +365,18 @@ function Spotlight({ slug, lib, topics, closing, onOpen, onTopic, onClose }) {
 const SUB_KEY = (slug) => `flipcraft_sub_${slug}`;
 function readSubscribed(slug) { try { return localStorage.getItem(SUB_KEY(slug)) === "1"; } catch { return false; } }
 
-function SubscribeDialog({ slug, lib, topics, issue, onClose, onDone }) {
+function SubscribeDialog({ slug, lib, topics, issue, credentials = false, onClose, onDone }) {
   const brand = shortName(lib.brand?.name) || lib.brand?.name || "us";
   const [f, setF] = useState({ name: "", email: "", organisation: "", phone: "", message: "", website: "" });
   const [interests, setInterests] = useState([]);
+  const [creds, setCreds] = useState(credentials);
   const [state, setState] = useState("form");
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
   const submit = async (e) => {
     e.preventDefault();
     setState("sending");
     try {
-      await publicApi.post(`/public/libraries/${slug}/subscribe`, { ...f, interests, issue: issue?.flipbook_id || "" });
+      await publicApi.post(`/public/libraries/${slug}/subscribe`, { ...f, interests, issue: issue?.flipbook_id || "", wants_credentials: !!(lib.offer_credentials && creds) });
       try { localStorage.setItem(SUB_KEY(slug), "1"); } catch { /* private mode */ }
       setState("done");
       onDone();
@@ -392,12 +393,12 @@ function SubscribeDialog({ slug, lib, topics, issue, onClose, onDone }) {
           <div className="py-6 text-center lib-swap">
             <div className="mx-auto w-12 h-12 rounded-full bg-white text-[color:var(--ink)] grid place-items-center"><Check className="w-6 h-6" /></div>
             <h2 className="mt-5 text-[26px] font-light">Thank you{f.name ? `, ${f.name.split(" ")[0]}` : ""}.</h2>
-            <p className="mt-2 text-[15px] text-white/65 leading-relaxed">You're on the list for the {lib.title}. Someone from {brand} will be in touch.</p>
+            <p className="mt-2 text-[15px] text-white/65 leading-relaxed">You're on the list for the {lib.title}.{creds && lib.offer_credentials ? ` We'll send ${brand}'s credentials to you.` : ""} Someone from {brand} will be in touch.</p>
             <button onClick={onClose} className="mt-7 h-11 px-6 rounded-full bg-white text-[color:var(--ink)] text-[15px] font-medium">Back to the library</button>
           </div>
         ) : (
           <form onSubmit={submit} className="space-y-4">
-            <div className="flex items-center gap-3"><Barcode count={7} active={3} height={18} /><span className="lib-cond text-[13px] text-[color:var(--mist)]">{lib.title}</span></div>
+            <div className="flex items-center gap-3"><Barcode count={7} active={3} height={18} /><span className="lib-cond text-[13px] text-[color:var(--mist)]">{lib.pitch_title || lib.title}</span></div>
             <div>
               <h2 className="text-[28px] font-light leading-tight tracking-[-0.01em]">Join {brand}'s network</h2>
               <p className="mt-2 text-[14.5px] text-white/65 leading-relaxed">Receive each issue when it's published, along with {brand}'s updates and invitations. Tell us what matters to you and we'll follow up.</p>
@@ -421,6 +422,12 @@ function SubscribeDialog({ slug, lib, topics, issue, onClose, onDone }) {
                 </div>
               </div>
             )}
+            {lib.offer_credentials && (
+              <label className="flex items-center gap-3 rounded-xl border border-white/12 bg-black/20 px-3.5 py-3 cursor-pointer hover:bg-black/30" data-testid="sub-credentials">
+                <input type="checkbox" checked={creds} onChange={(e) => setCreds(e.target.checked)} className="w-4 h-4 accent-[#9db8d4]" />
+                <span className="text-[14px] text-white/85">Also send me {brand}'s credentials<span className="block text-[12px] text-white/50">Our services, team and sectors, shared with you directly.</span></span>
+              </label>
+            )}
             <textarea value={f.message} onChange={set("message")} rows={2} placeholder="Anything you'd like to discuss? (optional)" className={`${field} h-auto py-2.5 resize-none`} />
             <button disabled={state === "sending"} className="w-full h-12 rounded-full bg-white text-[color:var(--ink)] text-[15px] font-medium hover:bg-[color:var(--paper)] disabled:opacity-60 flex items-center justify-center gap-2" data-testid="sub-submit">
               {state === "sending" && <Loader2 className="w-4 h-4 animate-spin" />}Subscribe
@@ -430,6 +437,72 @@ function SubscribeDialog({ slug, lib, topics, issue, onClose, onDone }) {
         )}
       </div>
     </div>
+  );
+}
+
+/* ------------------------------------------------------------------ share
+   Links go through the server's share page so LinkedIn and WhatsApp show the
+   issue's cover and title in the post, then land on the library. */
+function ShareSheet({ slug, lib, item, page = 0, onClose }) {
+  const brand = shortName(lib.brand?.name) || lib.brand?.name || "";
+  const url = `${API}/share/${slug}${item ? `?issue=${item.flipbook_id}${page > 0 ? `&page=${page + 1}` : ""}` : ""}`;
+  const name = item ? issueName(item) : "";
+  const topics = item ? topicsOf(item).filter((t) => t !== "Special editions").slice(0, 3) : [];
+  const [text, setText] = useState(() => item
+    ? `Worth a read: ${brand ? brand + "'s " : ""}${lib.title}, ${name}.${topics.length ? ` Covers ${topics.join(", ")}.` : ""}${lib.pitch_title ? ` ${lib.pitch_title}` : ""}`
+    : `${brand ? brand + "'s " : ""}${lib.title}: every issue in one place, searchable.${lib.pitch_title ? ` ${lib.pitch_title}` : ""}`);
+  const [copied, setCopied] = useState(false);
+  useEffect(() => { const k = (e) => e.key === "Escape" && onClose(); window.addEventListener("keydown", k); return () => window.removeEventListener("keydown", k); }, [onClose]);
+  const full = `${text}\n${url}`;
+  const open = (href) => window.open(href, "_blank", "noopener,noreferrer");
+  const copy = async () => { await copyText(url); setCopied(true); setTimeout(() => setCopied(false), 1800); };
+  const native = typeof navigator !== "undefined" && navigator.share;
+  const opt = "h-14 rounded-2xl flex items-center gap-3 px-4 text-left text-[15px] transition-colors";
+  return (
+    <div className="absolute inset-0 z-50 grid place-items-end sm:place-items-center p-3 sm:p-6 lib-spot-in" role="dialog" aria-modal="true" aria-label="Share" data-testid="share-sheet">
+      <button className="absolute inset-0 w-full h-full bg-[#0a1626]/70 backdrop-blur-sm cursor-default" onClick={onClose} aria-label="Close" tabIndex={-1} />
+      <div className="lib-glass lib-spot relative w-[min(520px,100%)] max-h-full overflow-y-auto lib-scroll rounded-3xl p-6 bg-[#0f1f33]/90">
+        <button onClick={onClose} className="absolute right-4 top-4 w-9 h-9 grid place-items-center rounded-full hover:bg-white/10" aria-label="Close"><X className="w-4 h-4" /></button>
+        <div className="flex items-center gap-4 pr-10">
+          {item && <img src={fileUrl(item.thumb)} alt="" className="w-12 rounded-[2px] shadow-lg" />}
+          <div className="min-w-0">
+            <h2 className="text-[22px] font-light leading-tight">Share {item ? "this issue" : "the library"}</h2>
+            <p className="text-[13.5px] text-white/55 mt-0.5 truncate">{item ? name : lib.title}{item && page > 0 ? `, page ${page + 1}` : ""}</p>
+          </div>
+        </div>
+        <p className="mt-5 text-[13px] text-white/55">Your post</p>
+        <textarea value={text} onChange={(e) => setText(e.target.value)} rows={3} className="mt-1.5 w-full rounded-xl bg-black/25 border border-white/12 p-3 text-[14.5px] leading-relaxed focus:outline-none focus:border-[color:var(--mist)] resize-none" data-testid="share-text" />
+        <div className="mt-4 grid grid-cols-2 gap-2.5">
+          <button onClick={() => open(`https://www.linkedin.com/feed/?shareActive=true&text=${encodeURIComponent(full)}`)} className={`${opt} bg-[#0a66c2] hover:bg-[#0b5cad] col-span-2 sm:col-span-1`} data-testid="share-linkedin">
+            <span className="w-8 h-8 rounded-md bg-white text-[#0a66c2] grid place-items-center font-bold text-[15px]">in</span>Post on LinkedIn</button>
+          <button onClick={() => open(`https://wa.me/?text=${encodeURIComponent(full)}`)} className={`${opt} bg-[#1fa855] hover:bg-[#1b9a4d] col-span-2 sm:col-span-1`} data-testid="share-whatsapp">
+            <svg viewBox="0 0 24 24" className="w-7 h-7 fill-white" aria-hidden="true"><path d="M12 2a10 10 0 0 0-8.6 15.1L2 22l5-1.3A10 10 0 1 0 12 2zm0 18.2a8.2 8.2 0 0 1-4.2-1.1l-.3-.2-3 .8.8-2.9-.2-.3A8.2 8.2 0 1 1 12 20.2zm4.5-6.1c-.2-.1-1.5-.7-1.7-.8-.2-.1-.4-.1-.6.1l-.8 1c-.1.2-.3.2-.5.1a6.7 6.7 0 0 1-3.3-2.9c-.2-.4.2-.4.7-1.2.1-.2 0-.3 0-.4l-.8-1.8c-.2-.5-.4-.4-.6-.4h-.5a1 1 0 0 0-.7.3 3 3 0 0 0-.9 2.2 5.2 5.2 0 0 0 1.1 2.7 11.9 11.9 0 0 0 4.6 4c1.7.7 2.4.8 3.2.7.5-.1 1.5-.6 1.7-1.2.2-.6.2-1.1.2-1.2-.1-.1-.3-.2-.5-.3z"/></svg>
+            Send on WhatsApp</button>
+          <button onClick={() => open(`mailto:?subject=${encodeURIComponent(item ? `${lib.title}: ${name}` : lib.title)}&body=${encodeURIComponent(full)}`)} className={`${opt} bg-white/[0.07] hover:bg-white/[0.13]`}><Mail className="w-5 h-5" />Email</button>
+          <button onClick={copy} className={`${opt} bg-white/[0.07] hover:bg-white/[0.13]`} data-testid="share-copy">{copied ? <Check className="w-5 h-5" /> : <Link2 className="w-5 h-5" />}{copied ? "Link copied" : "Copy link"}</button>
+          {native && <button onClick={() => navigator.share({ title: lib.title, text, url }).catch(() => {})} className={`${opt} bg-white/[0.07] hover:bg-white/[0.13] col-span-2 justify-center`}><Share2 className="w-5 h-5" />More options</button>}
+        </div>
+        <p className="mt-4 text-[12px] text-white/45 leading-relaxed">The link shows the cover and title in the post and opens {item ? "straight to this issue" : "the library"}.</p>
+      </div>
+    </div>
+  );
+}
+
+function UsefulButton({ slug, item }) {
+  const key = `flipcraft_useful_${item.flipbook_id}`;
+  const [on, setOn] = useState(() => { try { return localStorage.getItem(key) === "1"; } catch { return false; } });
+  const [pop, setPop] = useState(false);
+  const toggle = () => {
+    const next = !on;
+    setOn(next); if (next) { setPop(true); setTimeout(() => setPop(false), 700); }
+    try { next ? localStorage.setItem(key, "1") : localStorage.removeItem(key); } catch { /* private mode */ }
+    let v = ""; try { v = visitorId(); } catch { /* storage blocked */ }
+    if (v) publicApi.post(`/public/libraries/${slug}/useful`, { flipbook_id: item.flipbook_id, visitor: v, on: next }).catch(() => {});
+  };
+  return (
+    <button onClick={toggle} aria-pressed={on} className={`h-8 px-3.5 rounded-full text-[13px] flex items-center gap-2 shrink-0 transition-colors ${on ? "bg-white text-[color:var(--ink)]" : "lib-glass text-white/85 hover:bg-white/10"}`} data-testid="useful">
+      <ThumbsUp className={`w-4 h-4 ${pop ? "lib-pop" : ""}`} fill={on ? "currentColor" : "none"} />{on ? "Useful, thanks" : "Useful?"}
+    </button>
   );
 }
 
@@ -491,12 +564,71 @@ function TopicBar({ topics, topic, onTopic, total, className = "" }) {
   );
 }
 
-/* Phone browsing: swipe through covers, Cover Flow style. */
-function MobileBrowse({ items, latest, onOpen, onActive }) {
+/* A vertical picker wheel, like the iPhone date picker. Rows snap to the centre,
+   tilt away as they leave it, and the settled row is reported back. */
+function Wheel({ options, index, onPick, row = 52, className = "", align = "center", testid }) {
+  const ref = useRef(null);
+  const raf = useRef(0);
+  const timer = useRef(0);
+  const auto = useRef(false);
+  const first = useRef(true);
+  const paint = useCallback(() => {
+    const el = ref.current;
+    if (!el) return;
+    const mid = el.scrollTop + el.clientHeight / 2;
+    el.querySelectorAll("[data-row]").forEach((r) => {
+      const d = (r.offsetTop + row / 2 - mid) / row;
+      const a = Math.max(-2, Math.min(2, d));
+      r.style.opacity = String(Math.max(0.12, 1 - Math.abs(a) * 0.5));
+      if (!reduceMotion()) r.style.transform = `perspective(400px) rotateX(${-a * 24}deg) scale(${1 - Math.min(Math.abs(a), 2) * 0.1})`;
+    });
+  }, [row]);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || index < 0) return;
+    const top = index * row;
+    if (Math.abs(el.scrollTop - top) < 2) { paint(); return; }
+    auto.current = true;
+    el.scrollTo({ top, behavior: first.current || reduceMotion() ? "auto" : "smooth" });
+    first.current = false;
+    const t = setTimeout(() => { auto.current = false; paint(); }, 450);
+    return () => clearTimeout(t);
+  }, [index, row, options.length, paint]);
+  const onScroll = () => {
+    cancelAnimationFrame(raf.current);
+    raf.current = requestAnimationFrame(paint);
+    if (auto.current) return;
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => {
+      const i = Math.max(0, Math.min(options.length - 1, Math.round(ref.current.scrollTop / row)));
+      if (i !== index) onPick(i);
+    }, 130);
+  };
+  return (
+    <div ref={ref} onScroll={onScroll} className={`lib-wheel lib-noscroll overflow-y-auto ${className}`} style={{ height: row * 3, scrollSnapType: "y mandatory" }} data-testid={testid}>
+      <div style={{ height: row }} aria-hidden="true" />
+      {options.map((o, i) => (
+        <button key={o.key} data-row type="button" onClick={() => onPick(i)} aria-pressed={i === index}
+          className={`block w-full whitespace-nowrap truncate will-change-transform ${align === "right" ? "text-right" : align === "left" ? "text-left" : "text-center"}`}
+          style={{ height: row, lineHeight: `${row}px`, scrollSnapAlign: "center" }}>{o.label}</button>
+      ))}
+      <div style={{ height: row }} aria-hidden="true" />
+    </div>
+  );
+}
+
+/* Phone browsing: swipe through covers, Cover Flow style, or spin the month and
+   year wheels underneath to jump straight to an issue. */
+const yearKey = (it) => (undated(it) ? "More" : yearOf(it));
+const wheelLabel = (it) => (undated(it) ? it.label : it.special ? (it.kind || "Special").replace(/\s*edition$/i, "") : monthOf(it));
+function MobileBrowse({ items, latest, onOpen, onActive, tagline }) {
   const ref = useRef(null);
   const raf = useRef(0);
   const cur = useRef(0);
+  const driving = useRef(false);
+  const settle = useRef(0);
   const [idx, setIdx] = useState(0);
+  const [sel, setSel] = useState(0);
   const layout = useCallback(() => {
     const el = ref.current;
     if (!el) return;
@@ -510,38 +642,66 @@ function MobileBrowse({ items, latest, onOpen, onActive }) {
       card.style.opacity = String(1 - Math.min(Math.abs(a), 1) * 0.45);
       if (Math.abs(d) < bd) { bd = Math.abs(d); best = i; }
     });
-    if (best !== cur.current || !items[best]) { cur.current = best; setIdx(best); }
-    if (items[best]) { onActive(items[best]); prefetch(items[best]); }
+    if (best !== cur.current || !items[best]) { cur.current = best; setIdx(best); if (!driving.current) setSel(best); }
+    if (items[best] && !driving.current) { onActive(items[best]); prefetch(items[best]); }
   }, [items, onActive]);
-  useEffect(() => { cur.current = -1; layout(); }, [layout]);
+  useEffect(() => { cur.current = -1; driving.current = false; layout(); }, [layout]);
   const go = (i) => {
     const el = ref.current, ch = el?.children[i];
     if (ch) el.scrollTo({ left: ch.offsetLeft - (el.clientWidth - ch.offsetWidth) / 2, behavior: reduceMotion() ? "auto" : "smooth" });
   };
-  const it = items[idx];
+  // A wheel pick: the wheels settle at once and the covers sweep across to catch up.
+  const pick = (i) => {
+    if (i == null || i < 0 || i >= items.length) return;
+    driving.current = true;
+    setSel(i); onActive(items[i]); prefetch(items[i]);
+    go(i);
+    clearTimeout(settle.current);
+    settle.current = setTimeout(() => { driving.current = false; }, 1400);
+  };
+  const onCarousel = () => {
+    cancelAnimationFrame(raf.current);
+    raf.current = requestAnimationFrame(layout);
+    if (driving.current) {
+      clearTimeout(settle.current);
+      settle.current = setTimeout(() => { driving.current = false; }, 180);
+    }
+  };
+  const years = useMemo(() => [...new Set(items.map(yearKey))], [items]);
+  const it = items[sel];
+  const yk = it ? yearKey(it) : years[0];
+  const inYear = useMemo(() => items.map((x, i) => [x, i]).filter(([x]) => yearKey(x) === yk), [items, yk]);
+  const monthPos = inYear.findIndex(([, i]) => i === sel);
   return (
     <div className="flex flex-col pb-6" data-testid="library-mobile">
-      <div ref={ref} onScroll={() => { cancelAnimationFrame(raf.current); raf.current = requestAnimationFrame(layout); }}
-        className="lib-noscroll flex overflow-x-auto pt-4 pb-2" style={{ scrollSnapType: "x mandatory", paddingInline: "calc(50vw - min(26vw, 125px))" }}>
+      <div ref={ref} onScroll={onCarousel}
+        className="lib-noscroll flex overflow-x-auto pt-4 pb-2" style={{ scrollSnapType: "x mandatory", paddingInline: "calc(50vw - min(23vw, 110px))" }}>
         {items.map((x, i) => (
-          <div key={x.flipbook_id} className="shrink-0 w-[52vw] max-w-[250px] px-1.5" style={{ scrollSnapAlign: "center" }}>
-            <button type="button" onClick={(e) => (i === idx ? onOpen(x, e.currentTarget.querySelector(".lib-cover")) : go(i))} className="block w-full will-change-transform" aria-label={`${i === idx ? "Open" : "Show"} ${x.label}`} data-testid={`carousel-${x.flipbook_id}`}>
+          <div key={x.flipbook_id} className="shrink-0 w-[46vw] max-w-[220px] px-1.5" style={{ scrollSnapAlign: "center" }}>
+            <button type="button" onClick={(e) => (i === idx ? onOpen(x, e.currentTarget.querySelector(".lib-cover")) : pick(i))} className="block w-full will-change-transform" aria-label={`${i === idx ? "Open" : "Show"} ${x.label}`} data-testid={`carousel-${x.flipbook_id}`}>
               <Cover src={x.cover || x.thumb} aspect={x.aspect} width="100%" eager={i < 3} />
             </button>
           </div>
         ))}
       </div>
-      <div className="px-6 flex justify-center pt-2"><Barcode count={items.length} active={idx} onPick={go} labels={items.map((x) => x.label)} height={24} /></div>
+      <div className="px-6 flex justify-center pt-2"><Barcode count={items.length} active={sel} onPick={pick} labels={items.map((x) => x.label)} height={24} /></div>
       {it && (
-        <div key={it.flipbook_id} className="lib-swap px-6 pt-4 text-center">
-          <p className="text-[14px] text-white/55">{it.special ? it.kind : it.flipbook_id === latest?.flipbook_id ? "Latest issue" : "From the archive"}</p>
-          <h1 className="mt-1 leading-none tracking-[-0.03em]">
-            {undated(it) ? <span className="block text-[clamp(24px,7vw,32px)] font-light leading-tight">{it.label}</span> : <>
-            <span className="text-[clamp(36px,11vw,48px)] font-light">{monthOf(it)}</span>
-            <span className="ml-2.5 text-[clamp(20px,6vw,26px)] font-light text-[color:var(--mist)]">{yearOf(it)}</span></>}
-          </h1>
-          <button onClick={() => onOpen(it, ref.current?.children[idx]?.querySelector(".lib-cover"))} className="mt-5 h-12 px-8 rounded-full bg-white text-[color:var(--ink)] text-[15px] font-medium active:scale-[0.98] transition" data-testid="mobile-read">Read {it.special ? "edition" : monthOf(it)}</button>
-          <p className="lib-cond mt-3 text-[12.5px] text-white/45">{it.page_count} pages. Swipe for other issues.</p>
+        <div className="px-4 pt-3 text-center">
+          {tagline && <p className="lib-cond uppercase tracking-[0.16em] text-[11.5px] text-[color:var(--mist)] mb-1">{tagline}</p>}
+          <p className="text-[14px] text-white/55">{it.special ? (undated(it) ? "Special edition" : it.kind) : it.flipbook_id === latest?.flipbook_id ? "Latest issue" : "From the archive"}</p>
+          <div className="relative mt-1 flex items-center justify-center gap-3" data-testid="mobile-wheels">
+            <div className="lib-wheel-band" aria-hidden="true" />
+            <Wheel testid="wheel-month" options={inYear.map(([x]) => ({ key: x.flipbook_id, label: wheelLabel(x) }))} index={monthPos}
+              onPick={(m) => pick(inYear[m]?.[1])} row={46} align="right"
+              className={`${yk === "More" ? "w-[66vw] text-[22px]" : "w-[50vw] text-[clamp(30px,9vw,38px)]"} font-light tracking-[-0.02em]`} />
+            {yk !== "More" || years.length > 1 ? (
+              <Wheel testid="wheel-year" options={years.map((y) => ({ key: y, label: y === "More" ? "More" : y }))} index={years.indexOf(yk)}
+                onPick={(y) => pick(items.findIndex((x) => yearKey(x) === years[y]))} row={46} align="left"
+                className="w-[24vw] text-[clamp(20px,6vw,25px)] font-light text-[color:var(--mist)]" />
+            ) : null}
+          </div>
+          <button onClick={() => onOpen(it, ref.current?.children[sel]?.querySelector(".lib-cover"))} className="mt-3 h-12 px-8 rounded-full bg-white text-[color:var(--ink)] text-[15px] font-medium active:scale-[0.98] transition" data-testid="mobile-read">Read {it.special ? "edition" : monthOf(it)}</button>
+          <p className="lib-cond mt-3 text-[12.5px] text-white/45">{it.page_count} pages. Swipe the covers, or spin the month or year.</p>
         </div>
       )}
     </div>
@@ -606,7 +766,7 @@ function NextPanel({ next, onOpen, onBack, onSubscribe, subscribed }) {
   );
 }
 
-function Reader({ slug, item, items, startPage, embed, onOpen, onBack, onPage, onShown, onSubscribe, subscribed }) {
+function Reader({ slug, item, items, startPage, embed, onOpen, onBack, onPage, onShown, onSubscribe, subscribed, onShare }) {
   const [book, setBook] = useState(null);
   const [page, setPage] = useState(0);
   const [portrait, setPortrait] = useState(false);
@@ -688,7 +848,7 @@ function Reader({ slug, item, items, startPage, embed, onOpen, onBack, onPage, o
   const label = portrait || page === 0 || page === n - 1 ? `${page + 1}` : `${page + 1}–${Math.min(page + 2, n)}`;
   const blankLeft = !portrait && rect && page === 0 && zoom === 1;
   const blankRight = !portrait && rect && page === n - 1 && n % 2 === 0 && zoom === 1;
-  const share = async () => { await copyText(`${window.location.origin}/library/${slug}?issue=${item.flipbook_id}&page=${page + 1}`); toast.success("Link to this page copied"); };
+  const share = () => onShare(item, page);
   const toggleFs = () => (document.fullscreenElement ? document.exitFullscreen() : rootRef.current.requestFullscreen?.());
 
   return (
@@ -715,6 +875,7 @@ function Reader({ slug, item, items, startPage, embed, onOpen, onBack, onPage, o
           <button onClick={() => setContents(true)} className="h-8 px-3.5 rounded-full lib-glass text-[13px] shrink-0" data-testid="reader-contents">Contents</button>
         )}
         <Barcode count={n} active={page} done={seen} onPick={(i) => { const r = flipRef.current?.go(i); if (r != null) setPage(r); setTimeout(measure, 60); }} labels={book.pages.map((_, i) => `Page ${i + 1}`)} height={16} />
+        <UsefulButton key={item.flipbook_id} slug={slug} item={item} />
       </div>
       <div className="shrink-0 flex justify-center pb-4 pt-1">
         <ViewerToolbar label={`${label} / ${n}`} canPrev={page > 0} canNext={page < n - (portrait ? 1 : 2) || (page === 0 && n > 1)} onPrev={() => flipRef.current.prev()} onNext={() => flipRef.current.next()}
@@ -810,7 +971,8 @@ export default function Library({ embed = false }) {
   const [activeRow, setActiveRow] = useState(null);
   const [topic, setTopic] = useState("all");
   const [leaving, setLeaving] = useState(false);
-  const [subOpen, setSubOpen] = useState(false);
+  const [subOpen, setSubOpen] = useState(false); // false | "subscribe" | "credentials"
+  const [shareOf, setShareOf] = useState(null); // null | { item, page }
   const [subscribed, setSubscribed] = useState(() => readSubscribed(slug));
   const hero = useTilt(7);
   const mobile = useIsMobile();
@@ -995,7 +1157,7 @@ export default function Library({ embed = false }) {
               </button>
             )}
             {items.length > 0 && (
-              <button onClick={() => setSubOpen(true)} className={`h-9 rounded-full flex items-center gap-2 text-[14px] transition-colors ${subscribed ? "px-3 text-white/70 hover:bg-white/10" : "px-3 sm:px-4 bg-white/[0.12] hover:bg-white/20 border border-white/15"}`} data-testid="subscribe-open">
+              <button onClick={() => setSubOpen("subscribe")} className={`h-9 rounded-full flex items-center gap-2 text-[14px] transition-colors ${subscribed ? "px-3 text-white/70 hover:bg-white/10" : "px-3 sm:px-4 bg-white/[0.12] hover:bg-white/20 border border-white/15"}`} data-testid="subscribe-open">
                 {subscribed ? <Check className="w-4 h-4" /> : <MailPlus className="w-4 h-4" />}<span className="hidden sm:inline">{subscribed ? "Subscribed" : "Subscribe"}</span>
               </button>
             )}
@@ -1018,13 +1180,19 @@ export default function Library({ embed = false }) {
           ) : !open && mobile ? (
             <main className={`min-h-0 overflow-y-auto lib-noscroll transition-opacity duration-300 ${leaving ? "opacity-0" : ""}`}>
               <TopicBar topics={topics} topic={topic} onTopic={pickTopic} total={items.length} className="px-4 pt-4" />
-              <MobileBrowse items={shown} latest={latest} onOpen={(x, el) => fly(x, el)} onActive={setFocus} />
+              <MobileBrowse items={shown} latest={latest} onOpen={(x, el) => fly(x, el)} onActive={setFocus} tagline={lib.pitch_title} />
             </main>
           ) : !open ? (
             <main ref={browseRef} className={`min-h-0 overflow-y-auto lib-scroll transition-[opacity,filter] duration-300 ${leaving ? "opacity-0 blur-[2px]" : ""}`} data-testid="library-browse">
-              {/* hero: the one bold moment */}
+{/* hero: the one bold moment */}
               <section className="px-4 sm:px-8 lg:px-12 pt-10 sm:pt-12 pb-6 grid md:grid-cols-[minmax(0,1fr)_auto] gap-8 md:gap-14 items-center min-h-[54vh]" {...hero.bind}>
                 <div key={featured?.flipbook_id} className="lib-swap max-w-xl order-2 md:order-1">
+                  {lib.pitch_title && (
+                    <div className="flex items-center gap-3 mb-7" data-testid="masthead">
+                      <Barcode count={5} active={2} height={16} />
+                      <span className="lib-cond uppercase tracking-[0.18em] text-[12.5px] text-[color:var(--mist)]">{lib.pitch_title}</span>
+                    </div>
+                  )}
                   <p className="text-[15px] text-white/60">{featured?.special ? featured.kind : featured?.flipbook_id === latest?.flipbook_id ? "Latest issue" : "From the archive"}</p>
                   <h1 className="mt-2 leading-[0.92] tracking-[-0.035em]">
                     {undated(featured) ? <span className="block text-[clamp(36px,4.6vw,64px)] font-light leading-[1.05] tracking-[-0.02em]">{featured.label}</span> : <>
@@ -1045,6 +1213,7 @@ export default function Library({ embed = false }) {
                   )}
                   <div className="mt-8 flex items-center gap-4">
                     <button onClick={() => fly(featured, hero.target.current)} className="h-12 px-7 rounded-full bg-white text-[color:var(--ink)] text-[15px] font-medium hover:bg-[color:var(--paper)] active:scale-[0.98] transition" data-testid="library-read">Read {featured?.special ? "edition" : monthOf(featured)}</button>
+                    <button onClick={() => setShareOf({ item: featured, page: 0 })} className="h-12 w-12 rounded-full lib-glass grid place-items-center hover:bg-white/15 transition-colors" aria-label={`Share ${issueName(featured)}`} title="Share" data-testid="hero-share"><Share2 className="w-[18px] h-[18px]" /></button>
                     <span className="lib-cond text-[13px] text-white/50">{featured?.page_count} pages</span>
                   </div>
                 </div>
@@ -1087,10 +1256,28 @@ export default function Library({ embed = false }) {
                 </div>
               </div>
 
+              {lib.pitch_title && lib.pitch_text && (
+                <section className="px-4 sm:px-8 lg:px-12 pt-10 pb-16" data-testid="pitch">
+                  <div className="lib-closing max-w-5xl pt-12">
+                    <p className="lib-cond uppercase tracking-[0.18em] text-[12.5px] text-[color:var(--mist)]">Why read the {lib.title}</p>
+                    <h2 className="mt-4 text-[clamp(34px,4.4vw,60px)] font-light leading-[1.05] tracking-[-0.025em]">{lib.pitch_title}</h2>
+                    <p className="mt-5 text-[17px] sm:text-[19px] font-light text-white/70 leading-relaxed max-w-2xl">{lib.pitch_text}</p>
+                    {!subscribed && (
+                      <div className="mt-8 flex flex-wrap items-center gap-4">
+                        <button onClick={() => setSubOpen("subscribe")} className="h-12 px-7 rounded-full bg-white text-[color:var(--ink)] text-[15px] font-medium hover:bg-[color:var(--paper)] transition" data-testid="pitch-subscribe">Get it every month</button>
+                        <span className="text-[14px] text-white/50">Free. One issue a month.</span>
+                      </div>
+                    )}
+                  </div>
+                </section>
+              )}
+
               <footer className="px-4 sm:px-8 lg:px-12 pb-10 pt-2 flex flex-wrap items-center gap-x-6 gap-y-2 text-[13px] text-white/45">
                 {brand.footer && <span>{brand.footer}</span>}
                 {brand.website && <a href={brand.website} target="_blank" rel="noopener noreferrer" className="hover:text-white">{brand.website.replace(/^https?:\/\/(www\.)?/, "").replace(/\/$/, "")}</a>}
-                {!subscribed && <button onClick={() => setSubOpen(true)} className="hover:text-white underline-offset-4 hover:underline">Subscribe to updates</button>}
+                {!subscribed && <button onClick={() => setSubOpen("subscribe")} className="hover:text-white underline-offset-4 hover:underline">Subscribe to updates</button>}
+                {lib.offer_credentials && <button onClick={() => setSubOpen("credentials")} className="hover:text-white underline-offset-4 hover:underline" data-testid="request-credentials">Request {shortName(brand.name) || "our"} credentials</button>}
+                <button onClick={() => setShareOf({ item: null, page: 0 })} className="hover:text-white underline-offset-4 hover:underline">Share this library</button>
                 {lib.show_badge && <a href="/" target="_blank" rel="noopener noreferrer" className="ml-auto hover:text-white">Made with FlipCraft</a>}
               </footer>
             </main>
@@ -1098,7 +1285,7 @@ export default function Library({ embed = false }) {
             <main className="min-h-0 grid grid-cols-1 md:grid-cols-[84px_minmax(0,1fr)]" data-testid="library-reading">
               <div className="hidden md:block min-h-0 border-r border-white/[0.06]"><DockRail items={items} current={open.flipbook_id} onOpen={openIssue} /></div>
               <Reader slug={slug} item={open} items={items} startPage={startPage} embed={embed} onOpen={openIssue} onBack={back} onPage={setReadPage}
-                onShown={land} onSubscribe={() => setSubOpen(true)} subscribed={subscribed} />
+                onShown={land} onSubscribe={() => setSubOpen("subscribe")} subscribed={subscribed} onShare={(it, p) => setShareOf({ item: it, page: p })} />
             </main>
           )}
         </div>
@@ -1121,7 +1308,8 @@ export default function Library({ embed = false }) {
         </div>
       )}
 
-      {subOpen && <SubscribeDialog slug={slug} lib={lib} topics={topics} issue={open} onClose={() => setSubOpen(false)} onDone={() => setSubscribed(true)} />}
+      {subOpen && <SubscribeDialog slug={slug} lib={lib} topics={topics} issue={open} credentials={subOpen === "credentials"} onClose={() => setSubOpen(false)} onDone={() => setSubscribed(true)} />}
+      {shareOf && <ShareSheet slug={slug} lib={lib} item={shareOf.item} page={shareOf.page} onClose={() => setShareOf(null)} />}
     </div>
   );
 }

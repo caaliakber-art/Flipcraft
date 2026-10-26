@@ -26,11 +26,12 @@ export function LibraryStats({ id }) {
   const regionMax = Math.max(1, ...s.regions.map((r) => r.views));
   return (
     <div className="space-y-5" data-testid="library-stats">
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
         <Tile label="Issue opens" value={s.views} />
         <Tile label="Readers" value={s.readers} hint="Distinct browsers" />
         <Tile label="Pages read" value={s.pages_read} />
         <Tile label="Avg. time per issue" value={fmtTime(s.avg_seconds)} />
+        <Tile label="Marked useful" value={s.useful || 0} />
       </div>
       <div className="rounded-xl border border-white/10 p-4">
         <div className="text-xs text-slate-400 mb-3">Opens, last 30 days</div>
@@ -42,7 +43,7 @@ export function LibraryStats({ id }) {
         <div className="rounded-xl border border-white/10 overflow-hidden">
           <table className="w-full text-sm">
             <thead className="text-xs text-slate-400 bg-white/[0.03]">
-              <tr><th className="text-left font-medium p-3">Issue</th><th className="text-right font-medium p-3">Opens</th><th className="text-right font-medium p-3">Readers</th><th className="text-right font-medium p-3 hidden sm:table-cell">Pages / reader</th><th className="text-right font-medium p-3 hidden sm:table-cell">Avg. time</th></tr>
+              <tr><th className="text-left font-medium p-3">Issue</th><th className="text-right font-medium p-3">Opens</th><th className="text-right font-medium p-3">Readers</th><th className="text-right font-medium p-3 hidden sm:table-cell">Pages / reader</th><th className="text-right font-medium p-3 hidden sm:table-cell">Avg. time</th><th className="text-right font-medium p-3">Useful</th></tr>
             </thead>
             <tbody className="divide-y divide-white/5">
               {s.items.map((r) => (
@@ -52,6 +53,7 @@ export function LibraryStats({ id }) {
                   <td className="p-3 text-right tabular-nums">{r.readers}</td>
                   <td className="p-3 text-right tabular-nums hidden sm:table-cell">{r.avg_pages}</td>
                   <td className="p-3 text-right tabular-nums hidden sm:table-cell">{fmtTime(r.avg_seconds)}</td>
+                  <td className="p-3 text-right tabular-nums">{r.useful || 0}</td>
                 </tr>
               ))}
             </tbody>
@@ -90,7 +92,7 @@ export function Subscribers({ id, title }) {
     try { await api.delete(`/libraries/${id}/subscribers/${sid}`); setList((l) => l.filter((x) => x.id !== sid)); } catch (e) { toast.error(errMsg(e)); }
   };
   const exportCsv = () => {
-    const cols = ["name", "email", "organisation", "phone", "interests", "message", "status", "created_at"];
+    const cols = ["name", "email", "organisation", "phone", "interests", "wants_credentials", "message", "status", "created_at"];
     const esc = (v) => `"${String(Array.isArray(v) ? v.join("; ") : v ?? "").replace(/"/g, '""')}"`;
     const csv = [cols.join(","), ...list.map((x) => cols.map((c) => esc(x[c])).join(","))].join("\n");
     const a = document.createElement("a");
@@ -114,6 +116,7 @@ export function Subscribers({ id, title }) {
               <div className="flex-1 min-w-[200px]">
                 <div className="font-medium">{x.name}<span className="text-slate-400 font-normal">{x.organisation && `, ${x.organisation}`}</span></div>
                 <div className="text-sm text-slate-300"><a href={`mailto:${x.email}`} className="hover:underline">{x.email}</a>{x.phone && <span className="text-slate-400">  ·  {x.phone}</span>}</div>
+                {x.wants_credentials && <div className="inline-block mt-1 text-[11px] font-medium rounded-full bg-amber-400/15 text-amber-300 px-2 py-0.5">Requested credentials</div>}
                 {x.interests?.length > 0 && <div className="text-xs text-slate-400 mt-1">Interested in {x.interests.join(", ")}</div>}
                 {x.message && <div className="text-sm text-slate-300 mt-1 italic">“{x.message}”</div>}
                 <div className="text-xs text-slate-500 mt-1">{fmtDate(x.created_at)}</div>

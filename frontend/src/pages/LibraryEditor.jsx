@@ -19,7 +19,7 @@ export default function LibraryEditor() {
   const { id } = useParams();
   const nav = useNavigate();
   const [lib, setLib] = useState(null);
-  const [form, setForm] = useState({ title: "", subtitle: "" });
+  const [form, setForm] = useState({ title: "", subtitle: "", pitch_title: "", pitch_text: "", offer_credentials: false });
   const [items, setItems] = useState([]);
   const [dirty, setDirty] = useState(false);
   const [queue, setQueue] = useState([]);
@@ -27,7 +27,7 @@ export default function LibraryEditor() {
 
   const apply = (data, keepEdits = false) => {
     setLib(data);
-    if (!keepEdits) { setForm({ title: data.title, subtitle: data.subtitle }); setItems(data.items); setDirty(false); }
+    if (!keepEdits) { setForm({ title: data.title, subtitle: data.subtitle, pitch_title: data.pitch_title || "", pitch_text: data.pitch_text || "", offer_credentials: !!data.offer_credentials }); setItems(data.items); setDirty(false); }
     else setItems((cur) => data.items.map((i) => cur.find((c) => c.flipbook_id === i.flipbook_id) ? { ...i, ...pick(cur.find((c) => c.flipbook_id === i.flipbook_id)) } : i));
   };
   const pick = (i) => ({ label: i.label, date: i.date, special: i.special, kind: i.kind });
@@ -88,6 +88,16 @@ export default function LibraryEditor() {
           <section className="grid sm:grid-cols-2 gap-4">
             <Field label="Library name"><Input value={form.title} onChange={(e) => { setForm({ ...form, title: e.target.value }); setDirty(true); }} data-testid="library-title-input" /></Field>
             <Field label="Short description (optional)"><Input value={form.subtitle} onChange={(e) => { setForm({ ...form, subtitle: e.target.value }); setDirty(true); }} placeholder="e.g. Monthly Communique" /></Field>
+          </section>
+
+          <section className="rounded-xl border border-white/10 p-5 space-y-4">
+            <div>
+              <h2 className="font-display font-semibold">Why read it</h2>
+              <p className="text-sm text-slate-400 mt-1">The headline runs as a masthead above the latest issue; with the supporting line it also closes the page with a Subscribe button. Leave the headline empty to hide both.</p>
+            </div>
+            <Field label="Headline"><Input value={form.pitch_title} maxLength={80} onChange={(e) => { setForm({ ...form, pitch_title: e.target.value }); setDirty(true); }} placeholder="e.g. Know Early. Act Wisely." data-testid="pitch-title-input" /></Field>
+            <Field label="Supporting line"><textarea value={form.pitch_text} maxLength={400} rows={2} onChange={(e) => { setForm({ ...form, pitch_text: e.target.value }); setDirty(true); }} placeholder="What readers get out of each issue" className="w-full rounded-md bg-transparent border border-input px-3 py-2 text-sm" /></Field>
+            <label className="flex items-center gap-3 text-sm"><Switch checked={form.offer_credentials} onCheckedChange={(v) => { setForm({ ...form, offer_credentials: v }); setDirty(true); }} />Let readers request your firm's credentials (requests arrive as subscribers)</label>
           </section>
 
           <section
