@@ -6,6 +6,7 @@ import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Switch } from "../components/ui/switch";
 import { api, copyText, errMsg, fileUrl } from "../lib/api";
+import { LibraryStats, Subscribers } from "../components/LibraryInsights";
 
 const Field = ({ label, children }) => (
   <label className="block space-y-1.5">
@@ -129,6 +130,16 @@ export default function LibraryEditor() {
                 </div>
               ))}
             </div>
+          </section>
+
+          <section className="space-y-3">
+            <h2 className="font-display font-semibold">Readers</h2>
+            <LibraryStats id={id} />
+          </section>
+
+          <section className="space-y-3">
+            <h2 className="font-display font-semibold">Subscribers</h2>
+            <Subscribers id={id} title={lib.title} />
           </section>
         </div>
 

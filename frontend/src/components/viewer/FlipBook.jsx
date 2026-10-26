@@ -2,7 +2,7 @@ import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import { PageFlip } from "page-flip";
 import { OverlayContent } from "../OverlayContent";
 import { fileUrl } from "../../lib/api";
-import { enlargeCornerCurl, syncMedia, visiblePages } from "../../lib/flipExtras";
+import { blankEdges, enlargeCornerCurl, syncMedia, visiblePages } from "../../lib/flipExtras";
 
 // Mounted once per book; page-flip moves the page nodes so this must not re-render its children list.
 export const FlipBook = forwardRef(({ book, accent, onFlip, onReady, onTurnStart }, ref) => {
@@ -53,6 +53,7 @@ export const FlipBook = forwardRef(({ book, accent, onFlip, onReady, onTurnStart
     pf.loadFromHTML(el.querySelectorAll(".fc-page"));
     const fc = pf.getFlipController();
     enlargeCornerCurl(fc);
+    blankEdges(pf);
     const total = book.pages.length;
     const media = () => syncMedia(el, visiblePages(pf, total));
     const soften = () => {
@@ -65,7 +66,7 @@ export const FlipBook = forwardRef(({ book, accent, onFlip, onReady, onTurnStart
       cb.current.onFlip?.(e.data, visiblePages(pf, total));
     });
     pf.on("changeState", (e) => e.data === "flipping" && cb.current.onTurnStart?.());
-    pf.on("changeOrientation", () => { soften(); media(); cb.current.onReady?.(pf.getOrientation()); });
+    pf.on("changeOrientation", () => { blankEdges(pf); soften(); media(); cb.current.onReady?.(pf.getOrientation()); });
     pfRef.current = pf;
     cb.current.onReady?.(pf.getOrientation());
     media();

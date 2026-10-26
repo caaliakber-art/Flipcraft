@@ -248,6 +248,8 @@ class TrackEvent(BaseModel):
     source: Literal["link", "embed"] = "link"
     durations: Dict[int, float] = Field(default_factory=dict, max_length=4)
     finished: bool = False
+    tz: str = Field("", max_length=64)
+    seconds: float = Field(0, ge=0, le=120)
 
 
 class LeadIn(BaseModel):
@@ -429,19 +431,61 @@ async def track(fid: str, body: TrackEvent, authorization: Optional[str] = Heade
         raise HTTPException(status_code=404, detail="Flipbook not found")
     if optional_owner(authorization) == fb["owner_hash"]:
         return {"ok": True, "skipped": "owner"}
-    inc = {f"pages.{p}": 1 for p in body.pages if 0 <= p < fb.get("page_count", 0)}
+    pages = [p for p in body.pages if 0 <= p < fb.get("page_count", 0)]
+    inc = {f"pages.{p}": 1 for p in pages}
+    if body.seconds:
+        inc["seconds"] = round(body.seconds, 1)
     if body.open:
         day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         inc.update({"views": 1, f"days.{day}": 1, f"sources.{body.source}": 1})
+        region = region_of(body.tz)
+        if region:
+            inc[f"regions.{region}"] = 1
         try:
             res = await db.visitors.update_one({"flipbook_id": fid, "visitor": body.visitor}, {"$setOnInsert": {"at": now_iso()}}, upsert=True)
             if res.upserted_id:
                 inc["unique"] = 1
         except DuplicateKeyError:
             pass
+    if pages or body.seconds:
+        upd = {"$set": {"last": now_iso()}}
+        if pages:
+            upd["$addToSet"] = {"pages": {"$each": pages}}
+        if body.seconds:
+            upd["$inc"] = {"seconds": round(body.seconds, 1)}
+        await db.visitors.update_one({"flipbook_id": fid, "visitor": body.visitor}, upd)
     if inc:
         await db.stats.update_one({"flipbook_id": fid}, {"$inc": inc}, upsert=True)
     return {"ok": True}
+
+
+# Readers' country from the browser time zone: no IP lookup, nothing personal stored.
+TZ_COUNTRY = {
+    "Asia/Kolkata": "India", "Asia/Calcutta": "India", "Asia/Dubai": "UAE", "Asia/Singapore": "Singapore",
+    "Asia/Muscat": "Oman", "Asia/Qatar": "Qatar", "Asia/Riyadh": "Saudi Arabia", "Asia/Bahrain": "Bahrain",
+    "Asia/Kuwait": "Kuwait", "Asia/Kathmandu": "Nepal", "Asia/Colombo": "Sri Lanka", "Asia/Dhaka": "Bangladesh",
+    "Asia/Hong_Kong": "Hong Kong", "Asia/Tokyo": "Japan", "Asia/Shanghai": "China", "Asia/Kuala_Lumpur": "Malaysia",
+    "Asia/Jakarta": "Indonesia", "Asia/Bangkok": "Thailand", "Asia/Seoul": "South Korea", "Asia/Manila": "Philippines",
+    "Europe/London": "United Kingdom", "Europe/Dublin": "Ireland", "Europe/Paris": "France", "Europe/Berlin": "Germany",
+    "Europe/Amsterdam": "Netherlands", "Europe/Zurich": "Switzerland", "Europe/Luxembourg": "Luxembourg",
+    "Europe/Madrid": "Spain", "Europe/Rome": "Italy", "Europe/Stockholm": "Sweden", "Africa/Johannesburg": "South Africa",
+    "Africa/Nairobi": "Kenya", "Africa/Lagos": "Nigeria", "Indian/Mauritius": "Mauritius", "America/Toronto": "Canada",
+    "America/Vancouver": "Canada", "Pacific/Auckland": "New Zealand",
+}
+
+
+def region_of(tz: str) -> str:
+    tz = (tz or "").strip()
+    if not re.fullmatch(r"[A-Za-z_]+(/[A-Za-z_+-]+){0,2}", tz):
+        return ""
+    if tz in TZ_COUNTRY:
+        return TZ_COUNTRY[tz]
+    area = tz.split("/")[0]
+    if area == "America" and tz.split("/")[-1] in {"New_York", "Chicago", "Denver", "Los_Angeles", "Phoenix", "Detroit", "Anchorage"}:
+        return "United States"
+    if area == "Australia":
+        return "Australia"
+    return {"Europe": "Europe (other)", "Asia": "Asia (other)", "Africa": "Africa", "America": "Americas", "Pacific": "Pacific"}.get(area, "Other")
 
 
 @api.get("/flipbooks/{fid}/stats")
@@ -668,6 +712,120 @@ async def delete_library(lid: str, ohash: str = Depends(require_owner)):
     return {"ok": True}
 
 
+@api.get("/libraries/{lid}/stats")
+async def library_stats(lid: str, ohash: str = Depends(require_owner)):
+    lib = await owned_library(lid, ohash)
+    meta = {i["flipbook_id"]: i for i in lib.get("items", [])}
+    ids = list(meta)
+    stats = {s["flipbook_id"]: s async for s in db.stats.find({"flipbook_id": {"$in": ids}}, {"_id": 0})}
+    readers: Dict[str, list] = {}
+    async for v in db.visitors.find({"flipbook_id": {"$in": ids}}, {"_id": 0, "flipbook_id": 1, "visitor": 1, "pages": 1, "seconds": 1}):
+        readers.setdefault(v["flipbook_id"], []).append(v)
+    today = datetime.now(timezone.utc).date()
+    span = [(today - timedelta(days=i)).isoformat() for i in range(29, -1, -1)]
+    days = {d: 0 for d in span}
+    regions: Dict[str, int] = {}
+    rows, people = [], set()
+    for fid in ids:
+        s, rs = stats.get(fid, {}), readers.get(fid, [])
+        for d in span:
+            days[d] += s.get("days", {}).get(d, 0)
+        for k, n in s.get("regions", {}).items():
+            regions[k] = regions.get(k, 0) + n
+        people.update(r["visitor"] for r in rs)
+        pages = s.get("pages", {})
+        top = sorted(((int(k), n) for k, n in pages.items()), key=lambda x: -x[1])[:3]
+        it = meta[fid]
+        rows.append({"flipbook_id": fid, "label": f"{it.get('kind')}, {it.get('label')}" if it.get("special") else it.get("label", ""),
+                     "date": it.get("date", ""), "views": s.get("views", 0), "readers": len(rs),
+                     "avg_pages": round(sum(len(r.get("pages", [])) for r in rs) / len(rs), 1) if rs else 0,
+                     "avg_seconds": round(sum(r.get("seconds", 0) for r in rs) / len(rs)) if rs else 0,
+                     "top_pages": [{"page": p, "views": n} for p, n in top]})
+    rows.sort(key=lambda r: r["date"], reverse=True)
+    all_readers = [r for rs in readers.values() for r in rs]
+    return {
+        "views": sum(r["views"] for r in rows), "readers": len(people),
+        "pages_read": sum(len(r.get("pages", [])) for r in all_readers),
+        "avg_seconds": round(sum(r.get("seconds", 0) for r in all_readers) / len(all_readers)) if all_readers else 0,
+        "days": [{"date": d, "views": days[d]} for d in span],
+        "regions": sorted(({"name": k, "views": n} for k, n in regions.items()), key=lambda r: -r["views"]),
+        "items": rows,
+        "subscribers": await db.subscribers.count_documents({"library_id": lid}),
+    }
+
+
+# ---------------------------------------------------------------- subscribers (leads)
+class SubscribeIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    email: str = Field(min_length=5, max_length=200)
+    organisation: str = Field("", max_length=160)
+    phone: str = Field("", max_length=40)
+    interests: List[str] = Field(default_factory=list, max_length=12)
+    message: str = Field("", max_length=1000)
+    issue: str = Field("", max_length=40)
+    website: str = Field("", max_length=200)  # honeypot: people never see this field
+
+
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]{2,}$")
+subscribe_hits: Dict[str, list] = {}
+
+
+@api.post("/public/libraries/{slug}/subscribe")
+async def subscribe(slug: str, body: SubscribeIn, request: Request):
+    lib = await db.libraries.find_one({"slug": slug, "is_deleted": False}, {"_id": 0, "id": 1, "owner_hash": 1})
+    if not lib:
+        raise HTTPException(status_code=404, detail="Library not found")
+    if body.website:
+        return {"ok": True}
+    ip = (request.headers.get("x-forwarded-for") or (request.client.host if request.client else "")).split(",")[0].strip()
+    now = datetime.now(timezone.utc).timestamp()
+    hits = [t for t in subscribe_hits.get(ip, []) if now - t < 3600]
+    if len(hits) >= 8:
+        raise HTTPException(status_code=429, detail="Too many requests. Please try again later.")
+    subscribe_hits[ip] = hits + [now]
+    email = body.email.strip().lower()
+    if not EMAIL_RE.match(email):
+        raise HTTPException(status_code=400, detail="Please enter a valid email address")
+    # A repeat sign-up only adds to what we know; it never blanks earlier answers.
+    doc = {"name": body.name.strip(), "updated_at": now_iso()}
+    for k in ("organisation", "phone", "message", "issue"):
+        v = getattr(body, k).strip()
+        if v:
+            doc[k] = v
+    upd = {"$set": doc, "$setOnInsert": {"id": uuid.uuid4().hex[:12], "owner_hash": lib["owner_hash"], "status": "new", "created_at": now_iso()}}
+    interests = [i.strip()[:60] for i in body.interests if i.strip()]
+    if interests:
+        upd["$addToSet"] = {"interests": {"$each": interests}}
+    await db.subscribers.update_one({"library_id": lib["id"], "email": email}, upd, upsert=True)
+    return {"ok": True}
+
+
+@api.get("/libraries/{lid}/subscribers")
+async def list_subscribers(lid: str, ohash: str = Depends(require_owner)):
+    await owned_library(lid, ohash)
+    return await db.subscribers.find({"library_id": lid}, {"_id": 0}).sort("created_at", -1).to_list(5000)
+
+
+class SubscriberUpdate(BaseModel):
+    status: Literal["new", "contacted", "added"]
+
+
+@api.put("/libraries/{lid}/subscribers/{sid}")
+async def update_subscriber(lid: str, sid: str, body: SubscriberUpdate, ohash: str = Depends(require_owner)):
+    await owned_library(lid, ohash)
+    res = await db.subscribers.update_one({"library_id": lid, "id": sid}, {"$set": {"status": body.status}})
+    if not res.matched_count:
+        raise HTTPException(status_code=404, detail="Subscriber not found")
+    return {"ok": True}
+
+
+@api.delete("/libraries/{lid}/subscribers/{sid}")
+async def delete_subscriber(lid: str, sid: str, ohash: str = Depends(require_owner)):
+    await owned_library(lid, ohash)
+    await db.subscribers.delete_one({"library_id": lid, "id": sid})
+    return {"ok": True}
+
+
 @api.get("/public/libraries/{slug}")
 async def public_library(slug: str):
     lib = await db.libraries.find_one({"slug": slug, "is_deleted": False}, {"_id": 0})
@@ -887,6 +1045,7 @@ async def startup():
     await db.members.create_index([("workspace_id", 1), ("user_id", 1)], unique=True)
     await db.libraries.create_index("slug", unique=True)
     await db.libraries.create_index("owner_hash")
+    await db.subscribers.create_index([("library_id", 1), ("email", 1)], unique=True)
     await db.pagetext.create_index([("flipbook_id", 1), ("page", 1)], unique=True)
     try:
         await asyncio.to_thread(store.head_bucket, Bucket=S3_BUCKET)

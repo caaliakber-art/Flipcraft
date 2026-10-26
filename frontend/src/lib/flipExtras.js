@@ -57,3 +57,42 @@ export function syncMedia(root, visible) {
     node.dataset.live = on ? "1" : "0";
   });
 }
+
+// With a cover shown on its own, page-flip reuses the cover as the "page underneath"
+// when you peel back to it (or forward to a lone back cover), so the page you're on
+// shows through the uncovered corner. Hand it an empty sheet instead, painted the
+// colour of the stage, so the uncovered part reads as nothing there.
+export function blankEdges(pf) {
+  const pc = pf.getPageCollection();
+  if (!pc || pc.__blankEdges) return;
+  pc.__blankEdges = true;
+  const orig = pc.getBottomPage.bind(pc);
+  let blank = null;
+  const sheet = () => {
+    if (blank) return blank;
+    const first = pc.getPages()[0];
+    const host = first?.getElement?.().parentElement;
+    if (!host) return null;
+    const el = document.createElement("div");
+    el.className = "fc-page fc-blank";
+    el.style.display = "none";
+    host.appendChild(el);
+    blank = new first.constructor(pf.getRender(), el, "soft");
+    blank.load();
+    return blank;
+  };
+  pc.getBottomPage = (direction) => {
+    try {
+      if (pf.getOrientation() === "landscape") {
+        const spreads = pc.getSpread();
+        const cur = pc.currentSpreadIndex;
+        const target = direction === 0 ? spreads[cur + 1] : spreads[cur - 1]; // 0 = FORWARD
+        if (target && target.length === 1) return sheet() || orig(direction);
+      }
+    } catch { /* fall back to the library's choice */ }
+    return orig(direction);
+  };
+  const hide = () => { if (blank) blank.getElement().style.cssText = "display: none"; };
+  pf.on("changeState", (e) => e.data === "read" && hide());
+  pf.on("flip", hide);
+}
