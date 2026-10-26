@@ -16,7 +16,8 @@ import re
 import uuid
 
 import pymupdf as fitz
-import requests
+import boto3
+from botocore.config import Config as BotoConfig
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -27,13 +28,20 @@ db = client[os.environ['DB_NAME']]
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-STORAGE_BASE = (os.environ.get("INTEGRATION_PROXY_URL") or "").strip() or "https://integrations.emergentagent.com"
-STORAGE_URL = STORAGE_BASE.rstrip("/") + "/objstore/api/v1/storage"
-EMERGENT_KEY = os.environ.get("EMERGENT_LLM_KEY")
+# Cloudflare R2 (S3-compatible) storage
+R2_ACCOUNT_ID = os.environ.get("R2_ACCOUNT_ID", "")
+R2_BUCKET = os.environ.get("R2_BUCKET", "flipcraft")
+r2 = boto3.client(
+    "s3",
+    endpoint_url=f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com",
+    aws_access_key_id=os.environ.get("R2_ACCESS_KEY_ID"),
+    aws_secret_access_key=os.environ.get("R2_SECRET_ACCESS_KEY"),
+    region_name="auto",
+    config=BotoConfig(signature_version="s3v4", retries={"max_attempts": 3, "mode": "standard"}),
+)
 APP_NAME = "flipcraft"
 CACHE_DIR = Path("/tmp/flipcraft_cache")
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
-storage_key = None
 
 MAX_PDF = 100 * 1024 * 1024
 MAX_VIDEO = 300 * 1024 * 1024
@@ -42,39 +50,15 @@ IMAGE_TYPES = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "i
 VIDEO_TYPES = {"video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov", "video/ogg": "ogv"}
 
 
-def init_storage(force: bool = False):
-    global storage_key
-    if storage_key and not force:
-        return storage_key
-    resp = requests.post(f"{STORAGE_URL}/init", json={"emergent_key": EMERGENT_KEY}, timeout=30)
-    resp.raise_for_status()
-    storage_key = resp.json()["storage_key"]
-    return storage_key
-
-
 def put_object(path: str, data: bytes, content_type: str) -> dict:
-    for attempt in range(2):
-        key = init_storage(force=attempt > 0)
-        resp = requests.put(f"{STORAGE_URL}/objects/{path}", headers={"X-Storage-Key": key, "Content-Type": content_type}, data=data, timeout=300)
-        if resp.status_code == 404 and attempt == 0:
-            continue
-        resp.raise_for_status()
-        return resp.json()
+    r2.put_object(Bucket=R2_BUCKET, Key=path, Body=data, ContentType=content_type)
+    return {"path": path, "size": len(data)}
 
 
 def download_to(path: str, dest: Path):
-    for attempt in range(2):
-        key = init_storage(force=attempt > 0)
-        with requests.get(f"{STORAGE_URL}/objects/{path}", headers={"X-Storage-Key": key}, timeout=300, stream=True) as resp:
-            if resp.status_code == 404 and attempt == 0:
-                continue
-            resp.raise_for_status()
-            tmp = dest.with_suffix(f".{uuid.uuid4().hex}.part")
-            with open(tmp, "wb") as f:
-                for chunk in resp.iter_content(1024 * 1024):
-                    f.write(chunk)
-            tmp.rename(dest)
-            return
+    tmp = dest.with_suffix(f".{uuid.uuid4().hex}.part")
+    r2.download_file(R2_BUCKET, path, str(tmp))
+    tmp.rename(dest)
 
 
 def now_iso():
@@ -87,13 +71,13 @@ def owner_hash(key: Optional[str]) -> str:
     return hashlib.sha256(key.encode()).hexdigest()
 
 
-async def store_file(data: bytes, content_type: str, ext: str, folder: str, ohash: str, name: str = "") -> str:
+async def store_file(data: bytes, content_type: str, ext: str, folder: str, ohash: str, name: str = "", private: bool = False) -> str:
     path = f"{APP_NAME}/{folder}/{uuid.uuid4()}.{ext}"
     result = await asyncio.to_thread(put_object, path, data, content_type)
     await db.files.insert_one({
         "id": str(uuid.uuid4()), "storage_path": result["path"], "original_filename": name,
         "content_type": content_type, "size": result.get("size", len(data)), "owner_hash": ohash,
-        "is_deleted": False, "created_at": now_iso(),
+        "private": private, "is_deleted": False, "created_at": now_iso(),
     })
     return result["path"]
 
@@ -381,7 +365,7 @@ async def upload_media(file: UploadFile = File(...), x_owner_key: str = Header(N
 @api.get("/files/{path:path}")
 async def serve_file(path: str, request: Request):
     record = await db.files.find_one({"storage_path": path, "is_deleted": False}, {"_id": 0})
-    if not record:
+    if not record or record.get("private"):
         raise HTTPException(status_code=404, detail="File not found")
     local = CACHE_DIR / hashlib.sha1(path.encode()).hexdigest()
     if not local.exists():
@@ -433,10 +417,10 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup():
     try:
-        init_storage()
-        logger.info("Storage initialized")
+        await asyncio.to_thread(r2.head_bucket, Bucket=R2_BUCKET)
+        logger.info(f"R2 storage ready (bucket: {R2_BUCKET})")
     except Exception as e:
-        logger.error(f"Storage init failed: {e}")
+        logger.error(f"R2 storage check failed: {e}")
     await db.flipbooks.create_index("id", unique=True)
     await db.flipbooks.create_index("owner_hash")
     await db.files.create_index("storage_path")
