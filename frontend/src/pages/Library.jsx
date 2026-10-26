@@ -50,7 +50,7 @@ function Cover({ src, aspect = 0.707, width, reflect = false, coverRef, classNam
   );
 }
 
-function ShelfCard({ item, onFocus, onOpen, focused }) {
+function ShelfCard({ item, onFocus, onOpen, focused, stacked = false }) {
   const { target, bind } = useTilt(12);
   const special = item.special;
   return (
@@ -60,13 +60,13 @@ function ShelfCard({ item, onFocus, onOpen, focused }) {
       data-focus={focused ? "1" : "0"}
       onMouseEnter={() => onFocus(item)}
       onFocus={() => onFocus(item)}
-      onClick={() => onOpen(item)}
+      onClick={(e) => onOpen(item, e.currentTarget.querySelector(".lib-cover"))}
       {...bind}
       aria-label={`Open ${item.kind ? item.kind + ", " : ""}${item.label}`}
       data-testid={`shelf-${item.flipbook_id}`}
     >
       <Cover src={item.thumb || item.cover} aspect={item.aspect} width="100%" coverRef={target} />
-      <div className="pt-3 pr-2">
+      <div className={`pt-3 pr-2 transition-opacity duration-300 ${stacked ? "opacity-0" : "opacity-100"}`}>
         <div className={`text-[15px] leading-tight ${focused ? "text-white" : "text-white/75"} transition-colors`}>{special ? item.kind : monthOf(item)}</div>
         <div className="lib-cond text-[12px] text-white/45 mt-0.5">{special ? item.label : `${item.page_count} pages`}</div>
       </div>
@@ -83,8 +83,17 @@ function highlight(text, terms) {
   return text.split(re).map((part, i) => (i % 2 ? <mark key={i}>{part}</mark> : part));
 }
 
-function SearchPanel({ slug, lib, current, onOpen, onClose, autoFocus }) {
+// "Singhvi Dev & Unni LLP" -> "SDU"; used to name the assistant ("Ask SDU").
+function shortName(name = "") {
+  const skip = /^(llp|ltd|limited|pvt|private|inc|co|company|and|&|the|of)$/i;
+  const words = name.replace(/[.,]/g, " ").split(/\s+/).filter((w) => w && !skip.test(w) && /^[A-Z]/.test(w));
+  if (!words.length) return "";
+  return words.length === 1 ? words[0] : words.map((w) => w[0]).join("").toUpperCase();
+}
+
+function SearchPanel({ slug, lib, current, readPage, onOpen, onClose, autoFocus }) {
   const [q, setQ] = useState("");
+  const [related, setRelated] = useState(null);
   const [scope, setScope] = useState("all");
   const [res, setRes] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -101,6 +110,15 @@ function SearchPanel({ slug, lib, current, onOpen, onClose, autoFocus }) {
     return () => clearTimeout(t);
   }, [q, slug]);
 
+  useEffect(() => {
+    if (!current || readPage == null) { setRelated(null); return; }
+    const t = setTimeout(() => {
+      publicApi.get(`/public/libraries/${slug}/related`, { params: { flipbook_id: current.flipbook_id, page: readPage } })
+        .then((r) => setRelated(r.data.results)).catch(() => setRelated([]));
+    }, 350);
+    return () => clearTimeout(t);
+  }, [slug, current, readPage]);
+
   const suggestions = useMemo(() => {
     const counts = {};
     lib.items.forEach((it) => it.toc?.forEach((s) => { counts[s.section] = (counts[s.section] || 0) + s.items.length; }));
@@ -116,17 +134,23 @@ function SearchPanel({ slug, lib, current, onOpen, onClose, autoFocus }) {
     return [...by.values()];
   }, [res, scope, current]);
   const total = groups.reduce((a, g) => a + g.length, 0);
+  const assistant = `Ask ${shortName(lib.brand?.name) || "the archive"}`;
 
   return (
-    <aside className="lib-glass h-full rounded-2xl flex flex-col min-h-0 overflow-hidden" aria-label="Search the archive" data-testid="library-search">
+    <aside className="lib-glass h-full rounded-2xl flex flex-col min-h-0 overflow-hidden" aria-label={assistant} data-testid="library-search">
       <div className="p-5 pb-4 space-y-3 border-b border-white/10">
-        <div className="flex items-center justify-between">
-          <h2 className="text-[17px] font-medium">Search the archive</h2>
-          {onClose && <button onClick={onClose} className="w-8 h-8 grid place-items-center rounded-full hover:bg-white/10" aria-label="Close search"><X className="w-4 h-4" /></button>}
+        <div className="flex items-center gap-3">
+          <Barcode count={7} active={3} height={18} />
+          <div className="min-w-0">
+            <h2 className="text-[17px] font-medium leading-tight">{assistant}</h2>
+            <p className="text-[12.5px] text-white/50 leading-tight mt-0.5 truncate">Searches all {lib.items.length} issues</p>
+          </div>
+          {onClose && <button onClick={onClose} className="ml-auto w-8 h-8 grid place-items-center rounded-full hover:bg-white/10" aria-label={`Close ${assistant}`} data-testid="ask-close"><X className="w-4 h-4" /></button>}
         </div>
         <label className="relative block">
           <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-white/50" />
-          <input ref={inputRef} value={q} onChange={(e) => setQ(e.target.value)} placeholder={`Search ${lib.items.length} issues`}
+          <input ref={inputRef} value={q} onChange={(e) => setQ(e.target.value)} placeholder="Ask about GSTAT, TDS, FEMA..."
+            onKeyDown={(e) => e.key === "Escape" && (q ? setQ("") : onClose?.())}
             className="w-full h-11 rounded-xl bg-black/25 border border-white/10 pl-10 pr-9 text-[15px] placeholder:text-white/40 focus:outline-none focus:border-[color:var(--mist)] focus:bg-black/35 transition-colors"
             data-testid="library-search-input" />
           {busy && <Loader2 className="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 animate-spin text-white/50" />}
@@ -142,9 +166,28 @@ function SearchPanel({ slug, lib, current, onOpen, onClose, autoFocus }) {
       </div>
 
       <div className="flex-1 min-h-0 overflow-y-auto lib-scroll p-3">
+        {!res && current && related?.length > 0 && (
+          <div className="pb-3" data-testid="related-pages">
+            <h3 className="px-2 pt-1 pb-2 text-[13px] text-white/55">Related in other issues</h3>
+            <div className="space-y-1">
+              {related.map((r) => {
+                const meta = lib.items.find((i) => i.flipbook_id === r.flipbook_id) || {};
+                return (
+                  <button key={r.flipbook_id + r.page} onClick={() => onOpen(meta, r.page)} className="w-full text-left rounded-xl px-2.5 py-2.5 hover:bg-white/[0.07] focus-visible:bg-white/[0.07] focus:outline-none transition-colors flex gap-3 lib-swap" data-testid={`related-${r.flipbook_id}-${r.page}`}>
+                    <img src={fileUrl(r.thumb)} alt="" className="w-9 shrink-0 self-start rounded-[2px] shadow-md bg-white" />
+                    <span className="min-w-0">
+                      <span className="block text-[13.5px] font-medium">{meta.special ? `${meta.kind}, ${meta.label}` : meta.label}<span className="lib-cond font-normal text-[12px] text-[color:var(--mist)] ml-2">Page {r.page + 1}</span></span>
+                      <span className="block text-[13px] leading-snug text-white/70 line-clamp-2 mt-0.5">{highlight(r.snippet, r.terms)}</span>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
         {!res && (
           <div className="p-2 space-y-4">
-            <p className="text-[14px] text-white/60 leading-relaxed">Find any update across every issue. Results open the issue at the right page.</p>
+            <p className="text-[14px] text-white/60 leading-relaxed">{current ? "Or search every issue. Results open at the right page." : "Search every issue. Results open the issue at the right page."}</p>
             <div className="flex flex-wrap gap-2">
               {suggestions.map((s) => (
                 <button key={s} onClick={() => setQ(s)} className="h-8 px-3 rounded-full border border-white/15 text-[13px] text-white/80 hover:bg-white/10 hover:border-white/30 transition-colors">{s}</button>
@@ -250,7 +293,7 @@ function MobileBrowse({ items, latest, onOpen, onActive }) {
         className="lib-noscroll flex overflow-x-auto pt-5 pb-2" style={{ scrollSnapType: "x mandatory", paddingInline: "calc(50vw - min(26vw, 125px))" }}>
         {items.map((x, i) => (
           <div key={x.flipbook_id} className="shrink-0 w-[52vw] max-w-[250px] px-1.5" style={{ scrollSnapAlign: "center" }}>
-            <button type="button" onClick={() => (i === idx ? onOpen(x) : go(i))} className="block w-full will-change-transform" aria-label={`${i === idx ? "Open" : "Show"} ${x.label}`} data-testid={`carousel-${x.flipbook_id}`}>
+            <button type="button" onClick={(e) => (i === idx ? onOpen(x, e.currentTarget.querySelector(".lib-cover")) : go(i))} className="block w-full will-change-transform" aria-label={`${i === idx ? "Open" : "Show"} ${x.label}`} data-testid={`carousel-${x.flipbook_id}`}>
               <Cover src={x.cover || x.thumb} aspect={x.aspect} width="100%" eager={i < 3} />
             </button>
           </div>
@@ -269,7 +312,7 @@ function MobileBrowse({ items, latest, onOpen, onActive }) {
               {it.toc.slice(0, 3).map((s) => <span key={s.section} className="lib-cond h-7 px-3 rounded-full bg-white/[0.08] border border-white/10 text-[12.5px] text-white/80 inline-flex items-center">{s.section}</span>)}
             </div>
           )}
-          <button onClick={() => onOpen(it)} className="mt-5 h-12 px-8 rounded-full bg-white text-[color:var(--ink)] text-[15px] font-medium active:scale-[0.98] transition" data-testid="mobile-read">Read {it.special ? "edition" : monthOf(it)}</button>
+          <button onClick={() => onOpen(it, ref.current?.children[idx]?.querySelector(".lib-cover"))} className="mt-5 h-12 px-8 rounded-full bg-white text-[color:var(--ink)] text-[15px] font-medium active:scale-[0.98] transition" data-testid="mobile-read">Read {it.special ? "edition" : monthOf(it)}</button>
           <p className="lib-cond mt-3 text-[12.5px] text-white/45">{it.page_count} pages. Swipe for other issues.</p>
         </div>
       )}
@@ -329,7 +372,7 @@ function NextPanel({ next, onOpen, onBack }) {
   );
 }
 
-function Reader({ slug, item, items, startPage, embed, onOpen, onBack }) {
+function Reader({ slug, item, items, startPage, embed, onOpen, onBack, onPage }) {
   const [book, setBook] = useState(null);
   const [page, setPage] = useState(0);
   const [portrait, setPortrait] = useState(false);
@@ -360,7 +403,7 @@ function Reader({ slug, item, items, startPage, embed, onOpen, onBack }) {
   useEffect(() => {
     const k = (e) => { if (e.target.tagName === "INPUT") return; if (e.key === "ArrowRight") flipRef.current?.next(); if (e.key === "ArrowLeft") flipRef.current?.prev(); };
     const f = () => setFs(!!document.fullscreenElement);
-    const r = () => setTimeout(measure, 80);
+    const r = () => setTimeout(() => { flipRef.current?.update(); measure(); }, 80);
     window.addEventListener("keydown", k); window.addEventListener("resize", r); document.addEventListener("fullscreenchange", f);
     return () => { window.removeEventListener("keydown", k); window.removeEventListener("resize", r); document.removeEventListener("fullscreenchange", f); };
   }, [measure]);
@@ -376,6 +419,7 @@ function Reader({ slug, item, items, startPage, embed, onOpen, onBack }) {
     }, 60);
   }, [measure]);
 
+  useEffect(() => { onPage?.(page); }, [page, onPage]);
   const idx = items.findIndex((i) => i.flipbook_id === item.flipbook_id);
   const next = items[idx + 1];
   if (!book) return <div className="h-full grid place-items-center"><Loader2 className="w-7 h-7 animate-spin text-white/40" /></div>;
@@ -477,6 +521,9 @@ export default function Library({ embed = false }) {
   const [open, setOpen] = useState(null);
   const [startPage, setStartPage] = useState(0);
   const [searchSheet, setSearchSheet] = useState(false);
+  const [askOpen, setAskOpen] = useState(false);
+  const [readPage, setReadPage] = useState(null);
+  const [activeRow, setActiveRow] = useState(null);
   const hero = useTilt(7);
   const mobile = useIsMobile();
   const focusTimer = useRef(0);
@@ -492,6 +539,16 @@ export default function Library({ embed = false }) {
   }, [slug]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const items = useMemo(() => lib?.items || [], [lib]);
+  useEffect(() => {
+    const k = (e) => {
+      if (e.key === "/" && !/INPUT|TEXTAREA/.test(document.activeElement?.tagName || "")) { e.preventDefault(); window.innerWidth >= 1280 ? setAskOpen(true) : setSearchSheet(true); }
+    };
+    window.addEventListener("keydown", k);
+    return () => window.removeEventListener("keydown", k);
+  }, []);
+  // let the book re-fit once the panel has finished sliding
+  useEffect(() => { const t = setTimeout(() => window.dispatchEvent(new Event("resize")), 520); return () => clearTimeout(t); }, [askOpen]);
+  const toggleAsk = () => (window.innerWidth >= 1280 ? setAskOpen((v) => !v) : setSearchSheet(true));
   const latest = useMemo(() => items.find((i) => !i.special) || items[0], [items]);
   const featured = focus || latest;
   const shelves = useMemo(() => {
@@ -505,10 +562,40 @@ export default function Library({ embed = false }) {
 
   const onFocus = (it) => { clearTimeout(focusTimer.current); focusTimer.current = setTimeout(() => setFocus(it), 90); };
   const openIssue = (it, page = 0) => {
-    setOpen(it); setStartPage(page); setSearchSheet(false);
+    setOpen(it); setStartPage(page); setSearchSheet(false); setReadPage(page);
+    if (window.innerWidth >= 1280) setAskOpen(true);
     setParams((p) => { p.set("issue", it.flipbook_id); if (page) p.set("page", String(page + 1)); else p.delete("page"); return p; }, { replace: true });
   };
-  const back = () => { setOpen(null); setParams((p) => { p.delete("issue"); p.delete("page"); return p; }, { replace: true }); };
+  // The cover lifts out of the shelf and grows into the open book.
+  const fly = (it, el, page = 0) => {
+    if (!el || reduceMotion()) return openIssue(it, page);
+    const r = el.getBoundingClientRect();
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const phone = vw < 768;
+    const aspect = it.aspect || 0.707;
+    let H = vh - 64 - 150, W = H * aspect;
+    if (phone && W > vw - 32) { W = vw - 32; H = W / aspect; }
+    const railL = phone ? 0 : 84, railR = vw >= 1280 && askOpen ? 384 : 0;
+    const mid = railL + (vw - railL - railR) / 2;
+    const left = phone ? (vw - W) / 2 : mid;
+    const top = 64 + (vh - 64 - 110 - H) / 2;
+    const ghost = document.createElement("div");
+    ghost.className = "lib-ghost";
+    Object.assign(ghost.style, { left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px`, backgroundImage: `url(${fileUrl(it.cover || it.thumb)})` });
+    document.body.appendChild(ghost);
+    const s = H / r.height;
+    const to = `translate(${left - r.left}px, ${top - r.top}px) scale(${s})`;
+    ghost.animate([
+      { transform: "translate(0,0) scale(1) rotateY(0deg)", offset: 0 },
+      { transform: `translate(${(left - r.left) * 0.55}px, ${(top - r.top) * 0.55 - 30}px) scale(${1 + (s - 1) * 0.6}) rotateY(-14deg)`, offset: 0.55 },
+      { transform: `${to} rotateY(0deg)`, offset: 1 },
+    ], { duration: 720, easing: "cubic-bezier(0.22, 1, 0.36, 1)", fill: "forwards" });
+    setTimeout(() => openIssue(it, page), 520);
+    setTimeout(() => {
+      ghost.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 450, easing: "ease-out", fill: "forwards" }).onfinish = () => ghost.remove();
+    }, 1250);
+  };
+  const back = () => { setOpen(null); setReadPage(null); setAskOpen(false); setParams((p) => { p.delete("issue"); p.delete("page"); return p; }, { replace: true }); };
 
   if (error) return <div className="lib min-h-screen grid place-items-center px-6 text-center text-white/70">{error}</div>;
   if (!lib) return <div className="lib min-h-screen grid place-items-center"><Loader2 className="w-8 h-8 animate-spin text-white/40" /></div>;
@@ -535,14 +622,18 @@ export default function Library({ embed = false }) {
           )}
           <div className={`${items.length > 1 ? "md:ml-0" : ""} ml-auto flex items-center gap-2`}>
             {open && <button onClick={back} className="h-9 px-4 rounded-full text-[14px] text-white/80 hover:bg-white/10 flex items-center gap-2" data-testid="library-back"><ArrowLeft className="w-4 h-4" /><span className="hidden sm:inline">All issues</span></button>}
-            {items.length > 0 && <button onClick={() => setSearchSheet(true)} className="xl:hidden h-9 w-9 grid place-items-center rounded-full hover:bg-white/10" aria-label="Search"><Search className="w-4 h-4" /></button>}
+            {items.length > 0 && (
+              <button onClick={toggleAsk} aria-expanded={askOpen} className={`h-9 rounded-full flex items-center gap-2 transition-colors ${askOpen ? "bg-white text-[color:var(--ink)] px-4" : "hover:bg-white/10 px-2.5 sm:px-4"}`} data-testid="ask-toggle">
+                <Search className="w-4 h-4" /><span className="hidden sm:inline text-[14px]">Ask {shortName(brand.name) || "the archive"}</span>
+              </button>
+            )}
           </div>
         </div>
         {brand.stripe ? <div className="h-[8px] w-full opacity-40 brightness-0 invert" style={{ backgroundImage: `url(${fileUrl(brand.stripe)})`, backgroundRepeat: "repeat-x", backgroundSize: "auto 100%" }} aria-hidden="true" /> : <div className="h-px bg-white/10" />}
       </header>
 
       {/* body */}
-      <div className="relative z-10 flex-1 min-h-0 grid xl:grid-cols-[minmax(0,1fr)_360px] gap-0 xl:gap-6 xl:pr-6">
+      <div className={`relative z-10 flex-1 min-h-0 grid xl:grid-cols-[minmax(0,1fr)_auto] gap-0 ${askOpen ? "xl:gap-6 xl:pr-6" : ""} transition-[padding] duration-500`}>
         {items.length === 0 ? (
           <main className="min-h-0 grid place-items-center px-6 text-center" data-testid="library-empty">
             <div className="max-w-md lib-swap">
@@ -553,7 +644,7 @@ export default function Library({ embed = false }) {
           </main>
         ) : !open && mobile ? (
           <main className="min-h-0 overflow-y-auto lib-noscroll">
-            <MobileBrowse items={items} latest={latest} onOpen={(x) => openIssue(x, 0)} onActive={setFocus} />
+            <MobileBrowse items={items} latest={latest} onOpen={(x, el) => fly(x, el)} onActive={setFocus} />
           </main>
         ) : !open ? (
           <main className="min-h-0 overflow-y-auto lib-scroll" data-testid="library-browse">
@@ -576,12 +667,12 @@ export default function Library({ embed = false }) {
                   </div>
                 )}
                 <div className="mt-8 flex items-center gap-4">
-                  <button onClick={() => openIssue(featured, 0)} className="h-12 px-7 rounded-full bg-white text-[color:var(--ink)] text-[15px] font-medium hover:bg-[color:var(--paper)] active:scale-[0.98] transition" data-testid="library-read">Read {featured?.special ? "edition" : monthOf(featured)}</button>
+                  <button onClick={() => fly(featured, hero.target.current)} className="h-12 px-7 rounded-full bg-white text-[color:var(--ink)] text-[15px] font-medium hover:bg-[color:var(--paper)] active:scale-[0.98] transition" data-testid="library-read">Read {featured?.special ? "edition" : monthOf(featured)}</button>
                   <span className="lib-cond text-[13px] text-white/50">{featured?.page_count} pages</span>
                 </div>
               </div>
               <div className="lib-tilt order-1 md:order-2 justify-self-center md:justify-self-end lib-enter">
-                <button onClick={() => openIssue(featured, 0)} aria-label={`Open ${featured?.label}`} className="block focus:outline-none">
+                <button onClick={(e) => fly(featured, e.currentTarget.querySelector(".lib-cover"))} aria-label={`Open ${featured?.label}`} className="block focus:outline-none">
                   <Cover key={featured?.flipbook_id} src={featured?.cover} aspect={featured?.aspect} width="clamp(200px, 23vw, 340px)" reflect coverRef={hero.target} eager />
                 </button>
               </div>
@@ -589,17 +680,27 @@ export default function Library({ embed = false }) {
 
             {/* shelves */}
             <div className="pb-10 space-y-9">
-              {shelves.map((row) => (
-                <section key={row.key} aria-label={row.title}>
-                  <div className="px-4 sm:px-8 lg:px-12 flex items-baseline gap-3 mb-4">
-                    <h2 className={row.key === "special" ? "text-[22px] font-light" : "text-[34px] font-thin tracking-[-0.03em] leading-none"}>{row.title}</h2>
-                    <span className="lib-cond text-[13px] text-white/45">{row.list.length} {row.list.length === 1 ? "issue" : "issues"}</span>
-                  </div>
-                  <div className="lib-shelf flex gap-5 sm:gap-7 overflow-x-auto px-4 sm:px-8 lg:px-12 scroll-px-4 sm:scroll-px-8 lg:scroll-px-12 pb-4 pt-3">
-                    {row.list.map((it) => <ShelfCard key={it.flipbook_id} item={it} focused={featured?.flipbook_id === it.flipbook_id} onFocus={onFocus} onOpen={(x) => openIssue(x, 0)} />)}
-                  </div>
-                </section>
-              ))}
+              {shelves.map((row, ri) => {
+                const expanded = (activeRow ?? shelves[0]?.key) === row.key;
+                return (
+                  <section key={row.key} aria-label={row.title} onMouseEnter={() => setActiveRow(row.key)} onFocus={() => setActiveRow(row.key)} data-testid={`row-${row.key}`} data-expanded={expanded ? "1" : "0"}>
+                    <button type="button" onClick={() => setActiveRow(row.key)} className="px-4 sm:px-8 lg:px-12 flex items-baseline gap-3 mb-3 text-left">
+                      <h2 className={`${row.key === "special" ? "text-[22px] font-light" : "text-[34px] font-thin tracking-[-0.03em] leading-none"} transition-colors ${expanded ? "text-white" : "text-white/60"}`}>{row.title}</h2>
+                      <span className="lib-cond text-[13px] text-white/45">{row.list.length} {row.list.length === 1 ? "issue" : "issues"}</span>
+                    </button>
+                    <div className="lib-shelf flex overflow-x-auto px-4 sm:px-8 lg:px-12 scroll-px-4 sm:scroll-px-8 lg:scroll-px-12 pb-4 pt-3">
+                      {row.list.map((it, i) => (
+                        <div key={it.flipbook_id} className="lib-stack-item shrink-0"
+                          style={{ marginLeft: i === 0 ? 0 : expanded ? 26 : -122, zIndex: expanded ? 1 : row.list.length - i,
+                            transform: expanded ? "none" : `translateY(${Math.min(i, 6) * 3}px) rotate(${Math.min(i, 6) * 1.6}deg)`,
+                            opacity: expanded || i < 7 ? 1 : 0, transitionDelay: expanded ? `${Math.min(i, 12) * 22}ms` : "0ms" }}>
+                          <ShelfCard item={it} stacked={!expanded} focused={featured?.flipbook_id === it.flipbook_id} onFocus={onFocus} onOpen={(x, el) => fly(x, el)} />
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                );
+              })}
             </div>
 
             <footer className="px-4 sm:px-8 lg:px-12 pb-8 pt-2 flex flex-wrap items-center gap-x-6 gap-y-2 text-[13px] text-white/45">
@@ -611,15 +712,17 @@ export default function Library({ embed = false }) {
         ) : (
           <main className="min-h-0 grid grid-cols-1 md:grid-cols-[84px_minmax(0,1fr)]" data-testid="library-reading">
             <div className="hidden md:block min-h-0 border-r border-white/[0.06]"><DockRail items={items} current={open.flipbook_id} onOpen={openIssue} /></div>
-            <Reader slug={slug} item={open} items={items} startPage={startPage} embed={embed} onOpen={openIssue} onBack={back} />
+            <Reader slug={slug} item={open} items={items} startPage={startPage} embed={embed} onOpen={openIssue} onBack={back} onPage={setReadPage} />
           </main>
         )}
-        <div className={`${items.length ? "hidden xl:block" : "hidden"} min-h-0 py-6`}><SearchPanel slug={slug} lib={lib} current={open} onOpen={openIssue} /></div>
+        <div className={`${items.length ? "hidden xl:block" : "hidden"} min-h-0 py-6 overflow-hidden lib-ask`} style={{ width: askOpen ? 360 : 0, opacity: askOpen ? 1 : 0 }} aria-hidden={!askOpen}>
+          <div className="w-[360px] h-full">{askOpen && <SearchPanel slug={slug} lib={lib} current={open} readPage={readPage} onOpen={openIssue} onClose={() => setAskOpen(false)} autoFocus={!open} />}</div>
+        </div>
       </div>
 
       {searchSheet && (
         <div className="xl:hidden fixed inset-0 z-50 bg-[color:var(--ink)]/80 backdrop-blur-sm p-3 sm:p-6" role="dialog" aria-modal="true">
-          <div className="h-full max-w-lg ml-auto"><SearchPanel slug={slug} lib={lib} current={open} onOpen={openIssue} onClose={() => setSearchSheet(false)} autoFocus /></div>
+          <div className="h-full max-w-lg ml-auto"><SearchPanel slug={slug} lib={lib} current={open} readPage={readPage} onOpen={openIssue} onClose={() => setSearchSheet(false)} autoFocus /></div>
         </div>
       )}
     </div>

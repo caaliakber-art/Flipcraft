@@ -741,6 +741,80 @@ async def search_library(slug: str, q: str = ""):
     return {"query": q, "terms": words, "results": results}
 
 
+# Related pages: other issues that share this page's most distinctive terms (TF-IDF, no AI).
+RELATED_STOP = STOP | {m for m in MONTHS} | {"page", "communique", "monthly", "dated", "vide", "shall", "also", "such", "which", "under",
+                                             "have", "been", "will", "this", "that", "into", "their", "there", "where", "other", "notified",
+                                             "notification", "circular", "rules", "rule", "section", "provided", "issued", "regard", "case"}
+
+
+def _terms(text: str) -> List[str]:
+    return [w for w in re.findall(r"[a-z][a-z0-9\-]{2,}", text.lower()) if w not in RELATED_STOP]
+
+
+def build_vectors(data: dict) -> dict:
+    import math
+    docs = {}
+    df: Dict[str, int] = {}
+    for p in data["pages"]:
+        if p["page"] == 0:
+            continue  # cover pages repeat the contents list
+        tf: Dict[str, int] = {}
+        for w in _terms(p["text"]):
+            tf[w] = tf.get(w, 0) + 1
+        docs[(p["flipbook_id"], p["page"])] = tf
+        for w in tf:
+            df[w] = df.get(w, 0) + 1
+    n = max(len(docs), 1)
+    vecs = {}
+    for key, tf in docs.items():
+        v = {w: (1 + math.log(c)) * math.log(n / df[w]) for w, c in tf.items() if 1 < df[w] < n * 0.35}
+        top = dict(sorted(v.items(), key=lambda x: -x[1])[:40])
+        norm = math.sqrt(sum(x * x for x in top.values())) or 1
+        vecs[key] = {w: x / norm for w, x in top.items()}
+    return vecs
+
+
+@api.get("/public/libraries/{slug}/related")
+async def related_pages(slug: str, flipbook_id: str, page: int = 1):
+    data = await library_pages(slug)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Library not found")
+    if "vectors" not in data:
+        data["vectors"] = await asyncio.to_thread(build_vectors, data)
+    vecs = data["vectors"]
+    pages = [page, page + 1] if page > 0 else [1]
+    q: Dict[str, float] = {}
+    for pg in pages:
+        for w, x in vecs.get((flipbook_id, pg), {}).items():
+            q[w] = q.get(w, 0) + x
+    if not q:
+        return {"results": []}
+    scored = []
+    for (fid, pg), v in vecs.items():
+        if fid == flipbook_id:
+            continue
+        shared = [w for w in q if w in v]
+        if len(shared) < 2:
+            continue
+        s = sum(q[w] * v[w] for w in shared)
+        scored.append((s, fid, pg, sorted(shared, key=lambda w: -q[w] * v[w])[:3]))
+    scored.sort(key=lambda x: -x[0])
+    out, per_issue = [], {}
+    texts = {(p["flipbook_id"], p["page"]): p["text"] for p in data["pages"]}
+    for s, fid, pg, terms in scored:
+        if s < 0.1 or per_issue.get(fid, 0) >= 1:
+            continue
+        per_issue[fid] = 1
+        m = data["meta"].get(fid, {})
+        thumbs = data["ready"].get(fid, {}).get("thumbs", [])
+        out.append({"flipbook_id": fid, "page": pg, "label": m.get("label", ""), "kind": m.get("kind", ""),
+                    "thumb": thumbs[pg] if pg < len(thumbs) else "", "terms": terms,
+                    "snippet": make_snippet(texts.get((fid, pg), ""), terms, 150), "score": round(s, 3)})
+        if len(out) >= 4:
+            break
+    return {"results": out}
+
+
 @api.get("/files/{path:path}")
 async def serve_file(path: str, request: Request):
     record = await db.files.find_one({"storage_path": path, "is_deleted": False}, {"_id": 0})
