@@ -55,7 +55,7 @@ export default function Dashboard() {
           <div className="flex items-center gap-2 sm:gap-3">
             <div className="hidden sm:block text-right leading-tight" data-testid="workspace-info">
               <div className="text-sm font-medium">{account?.workspace.name}</div>
-              <div className="text-xs text-slate-500">{account?.user.email} · <span className="text-blue-400">{account?.workspace.plan_label}</span></div>
+              <div className="text-xs text-slate-500">{account?.user.email}{account?.workspace.plan !== "demo" && <> · <span className="text-blue-400">{account?.workspace.plan_label}</span></>}</div>
             </div>
             <Button variant="secondary" onClick={() => setBrandOpen(true)} data-testid="open-brand-settings-btn">
               {brand.logo ? <img src={fileUrl(brand.logo)} alt="" className="w-5 h-5 object-contain mr-2 rounded-sm" /> : <Palette className="w-4 h-4 mr-2" />}
