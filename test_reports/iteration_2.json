@@ -1,0 +1,32 @@
+{
+  "summary": "Iteration 2 retest. All requested items pass. Backend: 30/30 pytest pass, including the new tests for overlay src validation (youtube/vimeo host check, media prefix), media byte-sniff rejection, the nosniff header (200 and 206), the overlong key giving is_owner=false, and soft delete making the book's page/thumb files return 404. Frontend: viewer next/prev buttons and arrow keys work at 1920x1080 and 1100x1080 (1 -> 2-3 -> 4-5 -> 6 and back) and at 390x844 in portrait (1..6 and back). The thumbnails sheet updates the counter correctly (thumb-4 gives 4-5/6 on desktop and 5/6 on mobile), and next after a thumb jump continues correctly. The mobile toolbar is 345px wide inside 390, the zoom buttons are hidden and there is no horizontal overflow. Editor regression passed: adding a link and a picture (upload 200) and saving (PUT 200) persisted both and stayed on /edit with no unsaved indicator.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "DELETE /api/flipbooks/{id}", "issue": "If a book is deleted while convert_job is still running, pages stored after the delete get new db.files records with is_deleted=False, so they stay publicly served. Check is_deleted inside convert_job, or mark files deleted at the end of the job."},
+      {"endpoint": "PUT /api/flipbooks/{id}", "issue": "Image/video overlay src only checks the 'flipcraft/media/' prefix and not that the media belongs to the same owner, so another owner's media path can be referenced. Low risk."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Editor properties panel", "issues": ["H input shows an unrounded float (e.g. 18.8440221). Round it to 1-2 decimals."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_flipcraft_api.py", "/app/test_reports/pytest/pytest_results_iter2.xml"],
+  "action_items": [
+    "Optional: stop convert_job from creating live file records for books deleted mid-conversion",
+    "Optional: round the X/Y/W/H values shown in the editor properties panel"
+  ],
+  "critical_code_review_comments": [
+    "FlipBook.turn() temporarily toggles settings.disableFlipByClick. This works but depends on page-flip internals. Note it in a comment, or guard with try/finally.",
+    "get_flipbook is_owner check is now safe for malformed keys (length is checked before owner_hash)."
+  ],
+  "updated_files": ["/app/backend/tests/test_flipcraft_api.py"],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "seed_data_creation": "Created and then soft-deleted TEST_ books (key dede...de, b940c7faf0e8) plus pytest books under random keys. Seed book 774d9713d9ba was not modified.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "ffmpeg is not available. The video test uses a fake mp4 with 'ftyp' at bytes 4-8, which passes the sniff check (or /tmp/real.mp4 if present). The viewer counter shows 'a–b / n' (en dash) on desktop and 'n / 6' in portrait (<~700px). Studio key is in localStorage 'flipcraft_studio_key'."
+}

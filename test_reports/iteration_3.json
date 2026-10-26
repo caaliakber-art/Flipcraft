@@ -1,0 +1,29 @@
+{
+  "summary": "Iteration 3, frontend only. Every requested flow passed and there were no page errors. Viewer at 1920x1080: the intro corner peel shows at about 1.2s and is gone by 3.3s. Hovering near the outer corner folds it: the hard cover tilts and soft pages show a small curl. Dragging from the right corner past the spine flips forward (1/6 -> 2-3). A short drag that stays before the spine snaps back. Dragging back from the left corner flips backward (2-3 -> 1). Clicking a right page goes forward and clicking a left page goes back. The toolbar prev/next buttons and the arrow keys work, and the counter is always correct (1 -> 2-3 -> 4-5 -> 6 and back). The spine and paper gradients (.fc-paper) appear on the left, right and hard pages. Clicking these did NOT flip the page: the YouTube iframe, the image overlay, the link hotspot (it opens example.org/target in a new tab), the video centre, the video controls, and a drag that starts on the video. Turning the page pauses the video. Viewer at 390x844: next/prev go 1..6 and back with no horizontal overflow. Editor at 390x844: the editor-mobile-tools row shows and the desktop aside is hidden. The hint shows on an empty page and hides after an item is added. Adding a link, a YouTube embed and a picture (POST /media 200) each opens editor-mobile-properties. The Done button closes it, and tapping an item opens it again. Save sent PUT 200 and cleared the unsaved indicator. Editor desktop: the hint shows only on pages without items; adding a link, the embed dialog and delete all work; the mobile properties panel is hidden.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Editor mobile properties panel", "issues": ["The absolute 'Done' button (top-3 right-3) sits right on top of the Duplicate/Delete icons in the PropertiesPanel header, so the tap targets are cramped and can be tapped by mistake. Give the panel a header row with Done, or add padding-top / right padding."]},
+      {"screen": "Editor mobile tool row", "issues": ["At 390px only 2.5 of the 4 tools are visible ('Picture' and 'Web link' are off-screen). There is no scroll affordance (fade or arrow) to show the row scrolls. Consider icon-only or compact labels on small screens."]},
+      {"screen": "Editor mobile", "issues": ["The bottom properties sheet (max 45vh) covers the lower half of the canvas, so items placed low on the page are hidden while they are being edited."]}
+    ]
+  },
+  "test_report_links": [],
+  "action_items": [
+    "Fix the overlap between Done and the duplicate/delete icons in editor-mobile-properties",
+    "Optional: show that the mobile tool row scrolls, or make the buttons compact so all 4 fit at 390px"
+  ],
+  "critical_code_review_comments": [
+    "FlipBook intro peel releases with showCorner({x:-9999,y:-9999}), which depends on page-flip internals (the not-on-corner branch animates back). It works in 2.0.7. Also, if the user is already hovering or dragging when the 2.3s timer fires, it could cancel the user's fold. Check the flip state before calling it.",
+    "FlipBook cleanup only removes UI handlers and never calls pf.destroy(). On book change or unmount the PageFlip instance and its DOM moves stay behind. Consider pf.destroy() or clear().",
+    "The seed video overlay (flipcraft/media/video/44a0...mp4) gives MediaError 4 (it is the fake test mp4 from earlier iterations). This is not an app bug, but real playback inside the flipbook was not checked with real media."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "N/A (skipped)", "frontend": "100%"},
+  "seed_data_creation": "The mobile editor save test added 3 overlays to page 4 of seed book 774d9713d9ba. They were then removed with PUT (owner key c0ffee*8), so the overlays are back to the original 4 (video p3, link p2, youtube+image p1). The uploaded TEST_m.png media file remains.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "page-flip 2.0.7 adds --left/--right/--hard/--soft classes to .stf__item. Get visible pages with getComputedStyle(display)!='none'. The cover (index 0) shows alone on the right at 1920 (item rect x=960,w=626). Overlay testids: overlay-embed-qcu80wih (p0), overlay-image-pp8mc2ks (p0), overlay-link-jydjq6c8 (p1), overlay-video-6vieroqx (p2). The studio key for the seed book is 'c0ffee'*8."
+}

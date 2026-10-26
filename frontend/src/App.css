@@ -1,0 +1,121 @@
+.fc-hotspot {
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  outline: 1.5px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  transition: background-color 200ms ease, outline-color 200ms ease;
+  animation: fc-pulse 2.4s ease-in-out infinite;
+}
+.fc-hotspot:hover {
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+  outline-color: var(--accent);
+  animation: none;
+}
+@keyframes fc-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 35%, transparent); }
+  50% { box-shadow: 0 0 0 6px transparent; }
+}
+
+.fc-page {
+  background: #fff;
+  overflow: hidden;
+}
+.fc-media-hover {
+  transition: transform 260ms cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 260ms ease;
+  transform-origin: center;
+  border-radius: 4px;
+}
+.fc-media-hover:hover {
+  transform: scale(1.12);
+  z-index: 30 !important;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+}
+/* Paper lighting + spine shading for a printed-book feel */
+.fc-paper {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 5;
+  mix-blend-mode: multiply;
+}
+.stf__item.--right .fc-paper {
+  background:
+    linear-gradient(to right, rgba(0, 0, 0, 0.28) 0%, rgba(0, 0, 0, 0.1) 3%, rgba(0, 0, 0, 0.03) 8%, transparent 14%),
+    linear-gradient(to left, rgba(0, 0, 0, 0.06), transparent 4%);
+}
+.stf__item.--left .fc-paper {
+  background:
+    linear-gradient(to left, rgba(0, 0, 0, 0.28) 0%, rgba(0, 0, 0, 0.1) 3%, rgba(0, 0, 0, 0.03) 8%, transparent 14%),
+    linear-gradient(to right, rgba(0, 0, 0, 0.06), transparent 4%);
+}
+.stf__item.--hard .fc-paper {
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.12), transparent 40%, rgba(0, 0, 0, 0.08));
+  mix-blend-mode: normal;
+}
+/* Hardcover: linen grain, glossy sheen, rounded outer corners and a visible spine */
+.fc-hardcover .stf__item[data-cover] .fc-paper {
+  background:
+    repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.035) 0 1px, transparent 1px 3px),
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.05) 0 1px, transparent 1px 3px),
+    linear-gradient(125deg, rgba(255, 255, 255, 0.22), transparent 35%, transparent 65%, rgba(0, 0, 0, 0.18));
+}
+.fc-hardcover .stf__item[data-cover].--right .fc-paper::before,
+.fc-hardcover .stf__item[data-cover].--left .fc-paper::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 7%;
+}
+.fc-hardcover .stf__item[data-cover].--right .fc-paper::before {
+  left: 0;
+  background: linear-gradient(to right, rgba(0, 0, 0, 0.55), rgba(255, 255, 255, 0.18) 18%, rgba(0, 0, 0, 0.3) 32%, rgba(0, 0, 0, 0.08) 60%, transparent);
+}
+.fc-hardcover .stf__item[data-cover].--left .fc-paper::before {
+  right: 0;
+  background: linear-gradient(to left, rgba(0, 0, 0, 0.55), rgba(255, 255, 255, 0.18) 18%, rgba(0, 0, 0, 0.3) 32%, rgba(0, 0, 0, 0.08) 60%, transparent);
+}
+.fc-hardcover .stf__item[data-cover].--right { border-radius: 0 7px 7px 0; }
+.fc-hardcover .stf__item[data-cover].--left { border-radius: 7px 0 0 7px; }
+.fc-hardcover .stf__wrapper .stf__item[data-cover].--right {
+  box-shadow: 2px 2px 0 0 #2a2a2a, 4px 4px 0 0 #1c1c1c, 10px 14px 30px rgba(0, 0, 0, 0.6);
+}
+.fc-hardcover .stf__wrapper .stf__item[data-cover].--left {
+  box-shadow: -2px 2px 0 0 #2a2a2a, -4px 4px 0 0 #1c1c1c, -10px 14px 30px rgba(0, 0, 0, 0.6);
+}
+.stf__item {
+  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.08);
+}
+.stf__wrapper.--landscape .stf__item.--right {
+  box-shadow: 3px 3px 0 -1px #f3f1ec, 6px 6px 0 -2px #e6e3dc, 8px 10px 24px rgba(0, 0, 0, 0.45);
+}
+.stf__wrapper.--landscape .stf__item.--left {
+  box-shadow: -3px 3px 0 -1px #f3f1ec, -6px 6px 0 -2px #e6e3dc, -8px 10px 24px rgba(0, 0, 0, 0.45);
+}
+.stf__wrapper.--portrait .stf__item {
+  box-shadow: 3px 3px 0 -1px #f3f1ec, 6px 6px 0 -2px #e6e3dc, 6px 10px 24px rgba(0, 0, 0, 0.45);
+}
+[data-testid="flipbook-stage"] .stf__item {
+  cursor: grab;
+}
+[data-testid="flipbook-stage"] .stf__item:active {
+  cursor: grabbing;
+}
+.fc-stage-grid {
+  background-image: radial-gradient(rgba(255, 255, 255, 0.06) 1px, transparent 1px);
+  background-size: 22px 22px;
+}
+.fc-rise {
+  animation: fc-rise 600ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+@keyframes fc-rise {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.fc-glass {
+  background: rgba(19, 27, 46, 0.72);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+.fc-scroll::-webkit-scrollbar { height: 8px; width: 8px; }
+.fc-scroll::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.15); border-radius: 8px; }

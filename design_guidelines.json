@@ -1,0 +1,72 @@
+{
+  "project_name": "FlipCraft - Free Interactive PDF to Flipbook Studio",
+  "archetype": "Swiss & Precision Publishing Studio",
+  "theme": "Dark / Light Adaptive Studio Theme (Defaulting to sleek Studio Dark UI with crisp high contrast viewer canvas)",
+  "typography": {
+    "heading_font": "Outfit, system-ui, -apple-system, sans-serif",
+    "body_font": "Plus Jakarta Sans, system-ui, -apple-system, sans-serif",
+    "mono_font": "JetBrains Mono, monospace",
+    "h1": "text-3xl sm:text-4xl lg:text-5xl font-extrabold tracking-tight",
+    "h2": "text-xl sm:text-2xl lg:text-3xl font-bold tracking-tight",
+    "h3": "text-lg sm:text-xl font-semibold tracking-normal",
+    "body": "text-sm sm:text-base leading-relaxed",
+    "caption": "text-xs font-medium tracking-wider uppercase text-slate-400"
+  },
+  "colors": {
+    "background_dark": "#0B0F17",
+    "surface_dark": "#131B2E",
+    "surface_card": "#1E293B",
+    "border_dark": "rgba(255, 255, 255, 0.1)",
+    "primary": "#3B82F6",
+    "primary_hover": "#2563EB",
+    "accent_violet": "#8B5CF6",
+    "accent_emerald": "#10B981",
+    "accent_amber": "#F59E0B",
+    "text_primary": "#F8FAFC",
+    "text_secondary": "#94A3B8",
+    "text_muted": "#64748B",
+    "forbidden_colors": ["#7351B7", "#1B93A4"]
+  },
+  "layout_strategies": {
+    "dashboard": "High Density Grid (MODE B) with stats cards, recent flipbook list, filter search bar, and instant PDF dropzone",
+    "editor": "3-Pane Layout: Left toolbar & element picker, Center interactive canvas with drag-and-drop resize overlays & page navigation, Right sidebar for overlay properties & brand settings, Bottom thumbnail filmstrip",
+    "viewer": "Full-bleed immersive studio view with floating glassmorphism toolbar (zoom, sound toggle, fullscreen, share/embed, page navigation arrows, thumbnail drawer)",
+    "embed_mode": "Minimal chrome iframe view optimized for responsive embedding with subtle flip controls"
+  },
+  "image_urls": {
+    "mockups": [
+      "https://images.unsplash.com/photo-1521572063439-8a4186b6d843?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjY2NzN8MHwxfHNlYXJjaHw0fHxtYWdhemluZSUyMGJyb2NodXJlJTIwY2F0YWxvZyUyMGZsaXBib29rJTIwbW9ja3VwfGVufDB8fHx8MTc5MjkwOTQ1OXww&ixlib=rb-4.1.0&q=85",
+      "https://images.pexels.com/photos/36682054/pexels-photo-36682054.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "https://images.unsplash.com/photo-1632062549850-44a0a6eede16?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjY2NzN8MHwxfHNlYXJjaHwxfHxtYWdhemluZSUyMGJyb2NodXJlJTIwY2F0YWxvZyUyMGZsaXBib29rJTIwbW9ja3VwfGVufDB8fHx8MTc5MjkwOTQ1OXww&ixlib=rb-4.1.0&q=85",
+      "https://images.pexels.com/photos/2250136/pexels-photo-2250136.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940"
+    ]
+  },
+  "key_features_to_implement": [
+    "No-login local-first persistent storage (localStorage / IndexedDB / mock backend API fallback)",
+    "PDF Upload & Multi-page canvas rendering fallback with sample PDF preset templates (Product Catalog, Corporate Magazine, Portfolio, Cookbook)",
+    "Page-flip 3D engine with audio sound synthesis (Web Audio API realistic paper flip sound on page turn)",
+    "Interactive Overlay Canvas in Editor: Drag, resize, delete, and configure hotspots (Uploaded Video / YouTube / Vimeo iframe, Images, Clickable Web Links)",
+    "Brand Settings panel remembered across all flipbooks: Custom Logo image/URL, Brand Name, Accent Color picker, Brand Website Link",
+    "Share & Embed Modal: Shareable link generator, responsive HTML <iframe> embed code with copy-to-clipboard, width/height customize options",
+    "Public Flipbook Viewer: Fullscreen mode, Zoom pan & drag controls, Page counter, Table of contents / Thumbnail strip drawer, Audio toggle"
+  ],
+  "testing_requirements": {
+    "mandatory_attribute": "data-testid",
+    "examples": [
+      "data-testid=\"pdf-upload-dropzone\"",
+      "data-testid=\"flipbook-card-item\"",
+      "data-testid=\"editor-add-video-btn\"",
+      "data-testid=\"editor-add-image-btn\"",
+      "data-testid=\"editor-add-link-btn\"",
+      "data-testid=\"editor-save-btn\"",
+      "data-testid=\"viewer-next-page-btn\"",
+      "data-testid=\"viewer-prev-page-btn\"",
+      "data-testid=\"viewer-sound-toggle-btn\"",
+      "data-testid=\"viewer-zoom-in-btn\"",
+      "data-testid=\"viewer-fullscreen-btn\"",
+      "data-testid=\"viewer-share-btn\"",
+      "data-testid=\"brand-settings-save-btn\""
+    ]
+  },
+  "instructions_to_main_agent": "Ensure clean JS structure (not TSX files). Implement smooth interactive page transitions with canvas/CSS 3D transforms. Synthesize realistic paper flip sound using HTML5 Audio or Web Audio API synthesis oscillator/noise generator. Include fully interactive editor drag-and-resize hot spots for embedded YouTube, Vimeo, MP4 video, picture overlays, and clickable external links. Support persistent saved Brand Settings."
+}

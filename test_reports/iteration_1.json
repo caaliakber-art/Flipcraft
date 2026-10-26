@@ -1,0 +1,46 @@
+{
+  "summary": "First full test of FlipCraft. Backend: 20 pytest cases, 19 passed. Covered upload/conversion, ownership, update validation, soft delete, media upload, Range serving and brand. Frontend: dashboard upload with converting->ready card, share dialog, branding dialog (logo, name, colour, website, invalid colour error, invalid restore key error), editor (picture, YouTube, invalid-embed error, link with url and no-url save error, uploaded video, drag, resize, filmstrip page switch, save persisted), viewer header branding, embed mode and the no-access screen all work. CRITICAL: viewer page navigation is broken in most layouts. Prev never flips at 1920x1080. Next does not flip at 1100px width or on mobile (390x844). Arrow keys are affected the same way. I fixed one critical bug myself: after Save, the editor switched to the 'no access' screen.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/flipbooks/{id}", "issue": "This is a public endpoint, but it returns 401 when the X-Owner-Key header is longer than 128 chars. Line 255 calls owner_hash(), which raises. It should just return is_owner=false."},
+      {"endpoint": "DELETE /api/flipbooks/{id}", "issue": "Soft delete leaves page images and thumbs public at /api/files/... (db.files records are not marked is_deleted). Deleted content stays reachable by anyone who has the URL."},
+      {"endpoint": "POST /api/media", "issue": "The type check trusts the client-supplied Content-Type, and file bytes are not checked. Consider magic-byte checks and an X-Content-Type-Options: nosniff header on /api/files."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Viewer / FlipBook (page-flip flipPrev/flipNext)", "issue": "Prev button and ArrowLeft never turn the page at 1920x1080 (counter stays at 2-3 and at 6/6). Next button and ArrowRight do nothing at 1100x1080 and at 390x844 (stays 1/6).", "selector": "[data-testid='viewer-prev-page-btn'], [data-testid='viewer-next-page-btn']", "priority": "CRITICAL"},
+      {"component": "Viewer thumbnails sheet", "issue": "In landscape, clicking viewer-thumb-4 shows the counter '5–6 / 6'; the actual spread is pages 4–5. setPage(i) uses the clicked index, not the spread's first page. Use the page index from the flip event or pf.getCurrentPageIndex() instead.", "selector": "[data-testid='viewer-thumb-4']", "priority": "LOW"}
+    ],
+    "integration_issues": [
+      {"flow": "Editor save", "issue": "FIXED by testing agent. The PUT /api/flipbooks/{id} response had no is_owner field. Editor's save() calls setBook(data), so !book.is_owner became true and the editor switched to the 'no access' screen right after a successful save. The backend now sets is_owner=True in the PUT response.", "affected_selectors": ["[data-testid='editor-save-btn']", "[data-testid='editor-no-access']"]}
+    ],
+    "design_issues": [
+      {"screen": "Viewer mobile 390px", "issues": ["The toolbar is wider than the viewport: the prev button is clipped on the left and Share on the right. Hide the zoom % / thumbs buttons on mobile, or let the toolbar wrap or scroll."]},
+      {"screen": "Editor properties panel", "issues": ["The number inputs for X/Y/W/H are too narrow and the spinner covers the value (e.g. W '70' shows as '7(')."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_flipcraft_api.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "CRITICAL: Fix viewer navigation. Page-flip 2.0.7's flipPrev() flips at the fixed point {x:10, y:1}, and flipNext() at {x: rect.left + 2*pageWidth - 10, y:1}. Both points are relative to the container, not the book. With size:'stretch' the book is centred inside a larger container, so a horizontal offset breaks prev and a vertical offset breaks next. Fix: call pf.getFlipController().flip({x: rect.left + 10, y: rect.top + 1}) for prev and {x: rect.left + rect.pageWidth*2 - 10, y: rect.top + 1} for next, where rect = pf.getRender().getRect(); in portrait use rect.left + rect.pageWidth - 10 for next. Alternatives: fall back to pf.turnToPrevPage()/turnToNextPage(), or size the container to the book's exact aspect ratio. Retest at 1920x1080, 1100x1080 and 390x844.",
+    "Fix the thumbnail-jump page counter (use the flip event or pf.getCurrentPageIndex()).",
+    "Make GET /api/flipbooks/{id} tolerate malformed or overlong keys (return is_owner=false, no 401).",
+    "Mark a flipbook's page and thumb files as deleted on soft delete, so /api/files stops serving them.",
+    "Fix the viewer toolbar overflow on mobile, and widen the X/Y/W/H inputs in the editor properties panel."
+  ],
+  "critical_code_review_comments": [
+    "server.py update_flipbook: the response lacked is_owner, which the frontend depends on (fixed).",
+    "server.py convert_job: the second fitz.open(...) runs synchronously on the event loop, and the whole PDF (up to 100 MB) stays in memory for the whole background job.",
+    "server.py serve_file: concurrent first-time requests for the same file all download into the same .part temp file, which can race and corrupt it. Use a unique temp name or a per-path lock.",
+    "Viewer.jsx: if the book is still 'processing' it shows a static message and does not poll for readiness.",
+    "Overlay src is validated only on the frontend. The iframe goes through toEmbed, so it is safe today, but the backend accepts any src string."
+  ],
+  "updated_files": ["/app/backend/server.py (update_flipbook now returns is_owner=True)", "/app/backend/tests/test_flipcraft_api.py"],
+  "success_rate": {"backend": "95% (19/20)", "frontend": "~80% (all flows pass except viewer prev/next navigation, which is critical)"},
+  "seed_data_creation": "Flipbook 774d9713d9ba (title 'TEST Edited Book 2') created with studio key 'c0ffee'x8 (48 hex chars). Its overlays: page 0 YouTube + image, page 1 link to https://example.org/target, page 2 video. That key's brand was set to name 'TEST Acme', colour #E11D48, website https://acme.example, plus a logo. Pytest creates and deletes its own books with random keys.",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "No login: identity is the X-Owner-Key header (localStorage key 'flipcraft_studio_key', 48 hex chars). Set it with page.evaluate before navigating. Viewer nav repro: /view/774d9713d9ba at 1920x1080, click next then prev; the counter stays at '2–3 / 6'. At 390x844, next stays at '1 / 6'. Test assets: /tmp/sample.pdf (6 pages), /tmp/test_pic.png, /tmp/test_logo.png, /tmp/test_vid.mp4 (fake mp4 bytes). Run pytest without xdist flags; the pytest.ini already adds -n.",
+  "rca of the issue": "Viewer navigation: page-flip's Flip.flipPrev() uses the point {x:10, y:1}, and flipNext() uses {x: left + 2*pageWidth - 10, y:1}. Flip.flip() then checks that point against the book rect. FlipBook.jsx uses size:'stretch' inside a container that is larger than the book (h-full plus padding plus a different aspect ratio), so the book is centred with an offset. A horizontal offset (wide screens) puts x=10 outside the book, so prev fails; a vertical offset (narrow screens or mobile) puts y=1 outside it, so next and prev both fail. Mitigation: call the flip controller with coordinates offset by rect.left and rect.top, or use turnToPrev/NextPage."
+}

@@ -1,0 +1,28 @@
+{
+  "summary": "Iteration 4 tested reader analytics, hard_cover, overlay autoplay and the larger corner curl. Backend: 46/46 pytest pass (17 new analytics/hard_cover/autoplay tests plus the old regression tests). Frontend: almost everything works, with one bug. When hard_cover is OFF, the front cover (and the last page when it shows alone) still flips like a stiff hard page. Only the linen texture and spine go away. Working: tracking for anonymous /view and /embed (opens, unique readers, link/embed split, per-page reads, skip on owner visit); the dashboard 'N opens' and the stats dialog; video autoplay (muted, pauses when you leave the page, plays again when you come back; tested with webm because Playwright's Chromium has no H.264); YouTube autoplay=1&mute=1 and the reset when you leave; the large ~90-110px soft-page curl at 1920 and 390; drag, toolbar and keyboard flips; the editor hardcover and autoplay switches, with save PUT sending the right body.",
+  "backend_issues": {"critical": [], "minor": [
+    {"endpoint": "POST /api/flipbooks/{id}/track", "issue": "Public and unauthenticated, with no rate limit. The visitor id is made by the client, so anyone can inflate opens and unique readers by script. Acceptable for an MVP, but consider rate limiting by IP."}
+  ]},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "FlipBook.jsx (hard_cover=false)", "issue": "Turning hard_cover off does not make the covers soft. page-flip 2.0.7 PageCollection.createSpread() always calls pages[0].setDensity('hard') when showCover:true. It does the same for the last page when it sits alone in a landscape spread. So data-density='soft' is ignored, and the cover still swings as a stiff board with no curl (checked: class '--hard' on flipbook-page-0 while data-density='soft'). Fix: when !book.hard_cover, call pf.getPageCollection().getPages().forEach(p => p.setDensity('soft')) after loadFromHTML and again after each changeOrientation/update (createSpread runs again). Or patch createSpread the same way enlargeCornerCurl patches showCover.", "selector": "[data-testid=flipbook-page-0]", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/test_flipcraft_analytics.py", "/app/backend/tests/test_flipcraft_api.py", "/app/backend/tests/ui_seed_iter4.py", "/app/test_reports/pytest/pytest_results_iter4.xml"],
+  "action_items": [
+    "Make covers truly soft when hard_cover=false: override page-flip's forced hard density for page 0 and a lone last page (see ui_bugs)"
+  ],
+  "critical_code_review_comments": [
+    "syncMedia pauses the uploaded video when you leave the page but does not reset currentTime, so it resumes mid-clip. That is fine if intended; the review request said 'pauses/resets'.",
+    "The track endpoint has no rate limit, and the visitor ids are made by the client (see backend minor).",
+    "The cover peel/release timers and the missing pf.destroy() on unmount from iteration 3 are still there."
+  ],
+  "updated_files": ["/app/backend/tests/test_flipcraft_analytics.py", "/app/backend/tests/ui_seed_iter4.py"],
+  "success_rate": {"backend": "100%", "frontend": "~92% (1 bug: hard_cover off still makes the cover a hard page)"},
+  "seed_data_creation": "TEST book 1e7c06c14c4b (owner key 'd00d'*12, 6 pages). It has a webm video overlay vid1 on page index 1 (autoplay was turned OFF by the editor test) and a YouTube overlay yt1 on page index 2 (autoplay on). hard_cover was set to false by the editor test. Stats: 8 opens, 4 unique, 6 link, 2 embed. The pytest books are deleted in fixture teardown. Seed book 774d9713d9ba was not touched.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "No system ffmpeg. A static ffmpeg binary was unpacked from the imageio-ffmpeg wheel at /tmp/iff/x (find -name 'ffmpeg-*'). /tmp/test.mp4 (H.264) and /tmp/test.webm (VP8) exist. Playwright's Chromium cannot play H.264 (canPlayType mp4 = ''), so use webm for autoplay tests. The browser_automation tool loads page_url once before the script runs, so each run adds an extra open for /view URLs. Viewer toolbar testids: viewer-next-page-btn / viewer-prev-page-btn / viewer-page-counter."
+}
