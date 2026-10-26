@@ -5,6 +5,8 @@ import { Toaster } from "./components/ui/sonner";
 import Dashboard from "./pages/Dashboard";
 import Editor from "./pages/Editor";
 import Viewer from "./pages/Viewer";
+import Library from "./pages/Library";
+import LibraryEditor from "./pages/LibraryEditor";
 import { Login, Signup } from "./pages/Auth";
 import { Terms, Privacy } from "./pages/Legal";
 import { AuthProvider, useAuth } from "./lib/auth";
@@ -27,6 +29,9 @@ function App() {
           <Route path="/signup" element={<Signup />} />
           <Route path="/terms" element={<Terms />} />
           <Route path="/privacy" element={<Privacy />} />
+          <Route path="/libraries/:id" element={<RequireAuth><LibraryEditor /></RequireAuth>} />
+          <Route path="/library/:slug" element={<Library />} />
+          <Route path="/embed/library/:slug" element={<Library embed />} />
           <Route path="/view/:id" element={<Viewer />} />
           <Route path="/embed/:id" element={<Viewer embed />} />
         </Routes>

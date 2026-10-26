@@ -25,6 +25,9 @@ export const FlipBook = forwardRef(({ book, accent, onFlip, onReady, onTurnStart
       prev: () => turn(-1),
       go: (i) => { pfRef.current?.turnToPage(i); return pfRef.current?.getCurrentPageIndex() ?? i; },
       update: () => pfRef.current?.update(),
+      // book geometry inside the stage, used to fill the empty half next to a closed cover
+      rect: () => { try { return pfRef.current?.getRender().getRect(); } catch { return null; } },
+      orientation: () => pfRef.current?.getOrientation(),
     };
   });
 

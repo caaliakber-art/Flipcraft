@@ -119,3 +119,106 @@
 }
 .fc-scroll::-webkit-scrollbar { height: 8px; width: 8px; }
 .fc-scroll::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.15); border-radius: 8px; }
+
+/* ------------------------------------------------------------ Library (public) */
+.lib {
+  --ink: #0a1626;
+  --navy: #204262;
+  --steel: #44546a;
+  --mist: #9db8d4;
+  --paper: #f4f6f8;
+  font-family: Roboto, system-ui, sans-serif;
+  background: var(--ink);
+  color: #fff;
+}
+.lib h1, .lib h2, .lib h3 { font-family: inherit; }
+.lib-cond { font-family: "Roboto Condensed", Roboto, sans-serif; }
+
+/* ambient backdrop: the focused cover, blurred and darkened */
+.lib-backdrop {
+  position: absolute; inset: -60px;
+  background-size: cover; background-position: center;
+  filter: blur(60px) saturate(1.25) brightness(0.55);
+  transform: scale(1.15);
+  transition: opacity 700ms ease;
+}
+.lib-veil {
+  position: absolute; inset: 0;
+  background:
+    radial-gradient(120% 90% at 75% 20%, rgba(32, 66, 98, 0.25), transparent 60%),
+    linear-gradient(180deg, rgba(10, 22, 38, 0.35) 0%, rgba(10, 22, 38, 0.82) 55%, var(--ink) 100%);
+}
+
+/* 3D cover */
+.lib-tilt { perspective: 1400px; }
+.lib-cover {
+  position: relative;
+  transform-style: preserve-3d;
+  transition: transform 500ms cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 500ms ease;
+  will-change: transform;
+  border-radius: 3px 8px 8px 3px;
+  box-shadow:
+    0 2px 4px rgba(0, 0, 0, 0.3),
+    0 30px 60px -20px rgba(0, 0, 0, 0.75),
+    0 60px 120px -40px rgba(0, 0, 0, 0.8);
+  background: #fff;
+}
+.lib-cover img { display: block; width: 100%; height: 100%; object-fit: cover; border-radius: inherit; }
+.lib-cover::before { /* spine */
+  content: ""; position: absolute; inset: 0 auto 0 0; width: 7%;
+  background: linear-gradient(90deg, rgba(0,0,0,0.28), rgba(255,255,255,0.18) 35%, rgba(0,0,0,0.06) 70%, transparent);
+  border-radius: 3px 0 0 3px; pointer-events: none; z-index: 2;
+}
+.lib-glare {
+  position: absolute; inset: 0; border-radius: inherit; pointer-events: none; z-index: 3;
+  background: radial-gradient(circle at var(--gx, 30%) var(--gy, 20%), rgba(255,255,255,0.38), rgba(255,255,255,0) 45%);
+  mix-blend-mode: soft-light; opacity: var(--go, 0); transition: opacity 400ms ease;
+}
+.lib-reflect {
+  position: absolute; left: 4%; right: 4%; top: 100%; height: 30%;
+  background-size: 100% auto; background-position: bottom; transform: scaleY(-1);
+  opacity: 0.16; filter: blur(2px);
+  mask-image: linear-gradient(180deg, rgba(0,0,0,0.9), transparent 70%);
+  -webkit-mask-image: linear-gradient(180deg, rgba(0,0,0,0.9), transparent 70%);
+  pointer-events: none;
+}
+
+/* shelf cards */
+.lib-card { outline: none; }
+.lib-card .lib-cover { box-shadow: 0 10px 25px -10px rgba(0,0,0,0.7), 0 2px 4px rgba(0,0,0,0.3); }
+.lib-card:hover .lib-cover, .lib-card:focus-visible .lib-cover, .lib-card[data-focus="1"] .lib-cover {
+  box-shadow: 0 0 0 2px rgba(255,255,255,0.9), 0 30px 50px -15px rgba(0,0,0,0.85);
+}
+.lib-card:focus-visible .lib-cover { box-shadow: 0 0 0 3px var(--mist), 0 30px 50px -15px rgba(0,0,0,0.85); }
+.lib-shelf { scroll-snap-type: x proximity; scrollbar-width: none; }
+.lib-shelf::-webkit-scrollbar { display: none; }
+.lib-shelf > * { scroll-snap-align: start; }
+
+/* dock rail */
+.lib-dock-item { transition: transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1), margin 220ms; transform-origin: left center; }
+
+/* glass search */
+.lib-glass {
+  background: linear-gradient(180deg, rgba(255,255,255,0.09), rgba(255,255,255,0.04));
+  backdrop-filter: blur(28px) saturate(1.3);
+  -webkit-backdrop-filter: blur(28px) saturate(1.3);
+  border: 1px solid rgba(255,255,255,0.12);
+}
+.lib mark { background: rgba(157, 184, 212, 0.28); color: #fff; border-radius: 3px; padding: 0 2px; }
+.lib-scroll { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.18) transparent; }
+.lib-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+.lib-scroll::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.18); border-radius: 6px; }
+
+/* one orchestrated entrance for the hero */
+.lib-enter { animation: lib-enter 900ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+@keyframes lib-enter {
+  from { opacity: 0; transform: translateY(18px) scale(0.985); filter: blur(6px); }
+  to { opacity: 1; transform: none; filter: none; }
+}
+.lib-swap { animation: lib-swap 450ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+@keyframes lib-swap { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .lib-cover, .lib-dock-item, .lib-backdrop { transition: none !important; }
+  .lib-enter, .lib-swap { animation: none !important; }
+}

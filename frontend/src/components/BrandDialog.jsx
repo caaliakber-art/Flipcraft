@@ -17,8 +17,18 @@ export const BrandDialog = ({ open, onOpenChange, brand, onSaved }) => {
   const [form, setForm] = useState(brand);
   const [busy, setBusy] = useState(false);
   const fileRef = useRef(null);
+  const stripeRef = useRef(null);
   useEffect(() => { if (open) setForm(brand); }, [open, brand]);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+
+  const upload = (key) => async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    try { setBusy(true); const r = await uploadMedia(file); setForm((f) => ({ ...f, [key]: r.path })); }
+    catch (err) { toast.error(errMsg(err, "Upload failed")); }
+    finally { setBusy(false); }
+  };
 
   const onLogo = async (e) => {
     const file = e.target.files?.[0];
@@ -78,6 +88,32 @@ export const BrandDialog = ({ open, onOpenChange, brand, onSaved }) => {
           </Field>
           <Field label="Website (logo links here)">
             <Input value={form.website} onChange={set("website")} placeholder="https://example.com" data-testid="brand-website-input" />
+          </Field>
+          <div className="grid grid-cols-2 gap-4">
+            <Field label="Secondary colour">
+              <div className="flex gap-2">
+                <input type="color" value={/^#[0-9a-f]{6}$/i.test(form.color2 || "") ? form.color2 : "#44546A"} onChange={set("color2")} className="h-10 w-12 rounded-md bg-transparent border border-white/10 cursor-pointer" />
+                <Input value={form.color2 || ""} onChange={set("color2")} className="font-mono" />
+              </div>
+            </Field>
+            <Field label="Font">
+              <select value={form.font || "Inter"} onChange={set("font")} className="h-10 w-full rounded-md bg-black/30 border border-white/10 px-2 text-sm">
+                {["Inter", "Roboto", "Georgia"].map((f) => <option key={f} value={f}>{f}</option>)}
+              </select>
+            </Field>
+          </div>
+          <Field label="Brand stripe or pattern (optional, shown under the library header)">
+            <div className="flex items-center gap-3">
+              <div className="flex-1 h-10 rounded-md bg-black/30 border border-white/10 overflow-hidden grid place-items-center">
+                {form.stripe ? <img src={fileUrl(form.stripe)} alt="stripe" className="h-2 w-full object-cover object-left" /> : <span className="text-[10px] text-slate-500">none</span>}
+              </div>
+              <input ref={stripeRef} type="file" accept="image/*" hidden onChange={upload("stripe")} />
+              <Button variant="secondary" disabled={busy} onClick={() => stripeRef.current.click()}><Upload className="w-4 h-4" /></Button>
+              {form.stripe && <Button variant="ghost" size="icon" onClick={() => setForm((f) => ({ ...f, stripe: "" }))}><X className="w-4 h-4" /></Button>}
+            </div>
+          </Field>
+          <Field label="Footer text (e.g. firm name and cities)">
+            <Input value={form.footer || ""} onChange={set("footer")} placeholder="Singhvi Dev & Unni LLP, Bengaluru and Mumbai" />
           </Field>
           <Button className="w-full" disabled={busy} onClick={save} data-testid="brand-settings-save-btn">Save branding</Button>
 

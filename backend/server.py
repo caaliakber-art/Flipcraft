@@ -16,6 +16,7 @@ import re
 import uuid
 
 import pymupdf as fitz
+from toc import parse_toc
 import bcrypt
 import jwt
 import secrets
@@ -171,9 +172,14 @@ class Brand(BaseModel):
     name: str = Field("", max_length=80)
     logo: str = Field("", max_length=500)
     color: str = Field("#3B82F6", max_length=9)
+    color2: str = Field("#44546A", max_length=9)
     website: str = Field("", max_length=500)
+    font: Literal["Inter", "Roboto", "Georgia"] = "Inter"
+    theme: Literal["dark", "light"] = "dark"
+    stripe: str = Field("", max_length=500)
+    footer: str = Field("", max_length=200)
 
-    @field_validator("color")
+    @field_validator("color", "color2")
     @classmethod
     def check_color(cls, v):
         if not re.fullmatch(r"#[0-9a-fA-F]{6}", v):
@@ -257,6 +263,7 @@ def public_view(fb: dict, brand: Optional[dict]) -> dict:
         "pages": fb.get("pages", []), "thumbs": fb.get("thumbs", []),
         "page_width": fb.get("page_width", 0), "page_height": fb.get("page_height", 0),
         "overlays": fb.get("overlays", []), "sound": fb.get("sound", True), "hard_cover": fb.get("hard_cover", True),
+        "toc": fb.get("toc", []),
         "download": fb.get("download", "off") if fb.get("pdf_path") else "off", "has_pdf": bool(fb.get("pdf_path")),
         "created_at": fb["created_at"], "updated_at": fb.get("updated_at", fb["created_at"]),
         "brand": Brand(**brand).model_dump() if brand else Brand().model_dump(),
@@ -289,10 +296,17 @@ async def convert_job(fid: str, data: bytes, ohash: str):
             img = await asyncio.to_thread(lambda: page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False).tobytes("jpeg", jpg_quality=85))
             tz = 260 / max(page.rect.width, 1)
             th = await asyncio.to_thread(lambda: page.get_pixmap(matrix=fitz.Matrix(tz, tz), alpha=False).tobytes("jpeg", jpg_quality=70))
+            text = re.sub(r"\s+", " ", page.get_text()).strip()
+            await db.pagetext.update_one({"flipbook_id": fid, "page": i}, {"$set": {"text": text[:20000]}}, upsert=True)
             pages.append(await store_file(img, "image/jpeg", "jpg", f"pages/{fid}", ohash))
             thumbs.append(await store_file(th, "image/jpeg", "jpg", f"pages/{fid}", ohash))
             await db.flipbooks.update_one({"id": fid}, {"$set": {"pages_done": i + 1}})
+        try:
+            toc = await asyncio.to_thread(parse_toc, doc)
+        except Exception:
+            toc = []
         doc.close()
+        await db.flipbooks.update_one({"id": fid}, {"$set": {"toc": toc}})
         pdf_path = await store_file(data, "application/pdf", "pdf", f"pages/{fid}", ohash, private=True)
         await db.flipbooks.update_one({"id": fid}, {"$set": {"pages": pages, "thumbs": thumbs, "pdf_path": pdf_path, "status": "ready", "updated_at": now_iso()}})
         if (await db.flipbooks.find_one({"id": fid}, {"is_deleted": 1})).get("is_deleted"):
@@ -486,6 +500,238 @@ async def upload_media(file: UploadFile = File(...), ohash: str = Depends(requir
     return {"path": path, "kind": kind}
 
 
+# ---------------------------------------------------------------- libraries
+# A library is a public, branded shelf of a workspace's flipbooks (e.g. a
+# monthly newsletter archive) with search across every page.
+
+MONTHS = {m: i for i, m in enumerate(["january", "february", "march", "april", "may", "june", "july", "august",
+                                      "september", "october", "november", "december"], 1)}
+MONTH_ABBR = {m[:3]: i for m, i in MONTHS.items()}
+MONTH_NAMES = {i: m.capitalize() for m, i in MONTHS.items()}
+
+
+def guess_issue(name: str) -> dict:
+    """'Monthly Communique_October 2026' -> label October 2026, date 2026-10.
+    Anything that isn't a plain monthly issue is marked as a special edition."""
+    base = re.sub(r"\.pdf$", "", name, flags=re.I)
+    m = re.search(r"(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*[\s_\-.,]*((?:19|20)\d{2})", base, re.I)
+    if not m:
+        return {"label": clean_title(base), "date": "", "special": False, "kind": ""}
+    month, year = MONTH_ABBR[m.group(1).lower()], int(m.group(2))
+    when = f"{MONTH_NAMES[month]} {year}"
+    special = not re.search(r"monthly", base, re.I)
+    kind = ""
+    if special:
+        words = [w for w in re.sub(r"[_\-]+", " ", base[:m.start()]).split() if w.lower() not in ("sdu", "communique", "the")]
+        words = [w if w.isupper() else w.lower() for w in words]
+        kind = (" ".join(words) + " edition").strip()
+        kind = kind[0].upper() + kind[1:] if words else "Special edition"
+    return {"label": when, "date": f"{year:04d}-{month:02d}", "special": special, "kind": kind}
+
+
+def clean_title(t: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[_]+", " ", t)).strip()[:150]
+
+
+class LibraryItem(BaseModel):
+    flipbook_id: str = Field(max_length=40)
+    label: str = Field("", max_length=120)
+    date: str = Field("", pattern=r"^(\d{4}-\d{2})?$")
+    special: bool = False
+    kind: str = Field("", max_length=60)
+
+
+class LibraryIn(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    subtitle: str = Field("", max_length=300)
+
+
+class LibraryUpdate(BaseModel):
+    title: Optional[str] = Field(None, min_length=1, max_length=120)
+    subtitle: Optional[str] = Field(None, max_length=300)
+    items: Optional[List[LibraryItem]] = Field(None, max_length=500)
+
+
+class AddItem(BaseModel):
+    flipbook_id: str = Field(max_length=40)
+    filename: str = Field("", max_length=300)
+
+
+async def workspace_plan(ohash: str) -> dict:
+    ws = await db.workspaces.find_one({"id": ohash.split(":", 1)[1]}, {"_id": 0, "plan": 1}) if ohash.startswith("ws:") else None
+    return PLANS.get((ws or {}).get("plan", "free"), PLANS["free"])
+
+
+async def owned_library(lid: str, ohash: str) -> dict:
+    lib = await db.libraries.find_one({"id": lid, "is_deleted": False}, {"_id": 0})
+    if not lib or lib["owner_hash"] != ohash:
+        raise HTTPException(status_code=404, detail="Library not found")
+    return lib
+
+
+def sort_items(items: list) -> list:
+    return sorted(items, key=lambda i: (i.get("date") or "0000-00", not i.get("special")), reverse=True)
+
+
+async def library_view(lib: dict, public: bool) -> dict:
+    ids = [i["flipbook_id"] for i in lib.get("items", [])]
+    books = {b["id"]: b async for b in db.flipbooks.find({"id": {"$in": ids}, "is_deleted": False},
+                                                          {"_id": 0, "id": 1, "title": 1, "status": 1, "thumbs": 1, "pages": 1, "page_count": 1, "pages_done": 1, "toc": 1, "page_width": 1, "page_height": 1})}
+    items = []
+    for it in sort_items(lib.get("items", [])):
+        b = books.get(it["flipbook_id"])
+        if not b or (public and b["status"] != "ready"):
+            continue
+        items.append({**it, "status": b["status"], "page_count": b.get("page_count", 0), "pages_done": b.get("pages_done", 0),
+                      "cover": (b.get("pages") or [""])[0], "thumb": (b.get("thumbs") or [""])[0],
+                      "aspect": (b.get("page_width") or 595) / max(b.get("page_height") or 842, 1),
+                      "toc": b.get("toc", []) if public else [], "title": b["title"]})
+    plan = await workspace_plan(lib["owner_hash"])
+    brand = await get_brand(lib["owner_hash"])
+    return {"id": lib["id"], "slug": lib["slug"], "title": lib["title"], "subtitle": lib.get("subtitle", ""),
+            "items": items, "brand": Brand(**brand).model_dump() if brand else Brand().model_dump(),
+            "show_badge": not plan["remove_badge"], "updated_at": lib.get("updated_at", lib["created_at"])}
+
+
+@api.get("/libraries")
+async def list_libraries(ohash: str = Depends(require_owner)):
+    libs = await db.libraries.find({"owner_hash": ohash, "is_deleted": False}, {"_id": 0}).sort("created_at", -1).to_list(100)
+    return [await library_view(l, public=False) for l in libs]
+
+
+@api.post("/libraries")
+async def create_library(body: LibraryIn, ohash: str = Depends(require_owner)):
+    plan = await workspace_plan(ohash)
+    count = await db.libraries.count_documents({"owner_hash": ohash, "is_deleted": False})
+    if plan["libraries"] is not None and count >= plan["libraries"]:
+        raise HTTPException(status_code=403, detail="Libraries are available on the Premium and Pro Plus plans")
+    base = slugify(body.title)
+    slug, n = base, 1
+    while await db.libraries.find_one({"slug": slug}, {"_id": 1}):
+        n += 1
+        slug = f"{base}-{n}"
+    lib = {"id": uuid.uuid4().hex[:12], "slug": slug, "owner_hash": ohash, "title": body.title.strip(),
+           "subtitle": body.subtitle.strip(), "items": [], "is_deleted": False, "created_at": now_iso()}
+    await db.libraries.insert_one(dict(lib))
+    return await library_view(lib, public=False)
+
+
+@api.get("/libraries/{lid}")
+async def get_library(lid: str, ohash: str = Depends(require_owner)):
+    return await library_view(await owned_library(lid, ohash), public=False)
+
+
+@api.put("/libraries/{lid}")
+async def update_library(lid: str, body: LibraryUpdate, ohash: str = Depends(require_owner)):
+    lib = await owned_library(lid, ohash)
+    changes = {}
+    if body.title is not None:
+        changes["title"] = body.title.strip()
+    if body.subtitle is not None:
+        changes["subtitle"] = body.subtitle.strip()
+    if body.items is not None:
+        mine = {b["id"] async for b in db.flipbooks.find({"id": {"$in": [i.flipbook_id for i in body.items]}, "owner_hash": ohash}, {"_id": 0, "id": 1})}
+        changes["items"] = [i.model_dump() for i in body.items if i.flipbook_id in mine]
+    changes["updated_at"] = now_iso()
+    await db.libraries.update_one({"id": lid}, {"$set": changes})
+    lib.update(changes)
+    search_cache.pop(lib["slug"], None)
+    return await library_view(lib, public=False)
+
+
+@api.post("/libraries/{lid}/items")
+async def add_library_item(lid: str, body: AddItem, ohash: str = Depends(require_owner)):
+    lib = await owned_library(lid, ohash)
+    await owned_flipbook(body.flipbook_id, ohash)
+    items = [i for i in lib.get("items", []) if i["flipbook_id"] != body.flipbook_id]
+    items.append({"flipbook_id": body.flipbook_id, **guess_issue(body.filename or body.flipbook_id)})
+    await db.libraries.update_one({"id": lid}, {"$set": {"items": items, "updated_at": now_iso()}})
+    lib["items"] = items
+    search_cache.pop(lib["slug"], None)
+    return await library_view(lib, public=False)
+
+
+@api.delete("/libraries/{lid}")
+async def delete_library(lid: str, ohash: str = Depends(require_owner)):
+    lib = await owned_library(lid, ohash)
+    await db.libraries.update_one({"id": lid}, {"$set": {"is_deleted": True}})
+    search_cache.pop(lib["slug"], None)
+    return {"ok": True}
+
+
+@api.get("/public/libraries/{slug}")
+async def public_library(slug: str):
+    lib = await db.libraries.find_one({"slug": slug, "is_deleted": False}, {"_id": 0})
+    if not lib:
+        raise HTTPException(status_code=404, detail="Library not found")
+    return await library_view(lib, public=True)
+
+
+# Search: page texts for a library are loaded once and kept in memory for a few minutes.
+search_cache: Dict[str, dict] = {}
+STOP = {"the", "a", "an", "of", "and", "or", "to", "in", "on", "for", "is", "are", "what", "how", "about", "with", "by", "from", "at", "be"}
+
+
+async def library_pages(slug: str) -> Optional[dict]:
+    hit = search_cache.get(slug)
+    if hit and (datetime.now(timezone.utc) - hit["at"]).total_seconds() < 600:
+        return hit
+    lib = await db.libraries.find_one({"slug": slug, "is_deleted": False}, {"_id": 0})
+    if not lib:
+        return None
+    meta = {i["flipbook_id"]: i for i in lib.get("items", [])}
+    ready = {b["id"]: b async for b in db.flipbooks.find({"id": {"$in": list(meta)}, "is_deleted": False, "status": "ready"}, {"_id": 0, "id": 1, "thumbs": 1})}
+    pages = [{**p, "text": clean_page_text(p["text"])} async for p in db.pagetext.find({"flipbook_id": {"$in": list(ready)}}, {"_id": 0})]
+    entry = {"at": datetime.now(timezone.utc), "meta": meta, "ready": ready, "pages": pages}
+    search_cache[slug] = entry
+    return entry
+
+
+HEADER_NOISE = re.compile(r"(?i)monthly communique\s*\|\s*[a-z]+\s+\d{4}|page \d+ of \d+|bengalurua?\s*\|\s*a?mumbai")
+
+
+def clean_page_text(text: str) -> str:
+    text = re.sub(r"[\uf000-\uf0ff\u2022\u25aa\u25cf\u27a2]", " ", text)  # PDF bullet glyphs
+    return re.sub(r"\s+", " ", HEADER_NOISE.sub(" ", text)).strip()
+
+
+def make_snippet(text: str, terms: List[str], width: int = 220) -> str:
+    low = text.lower()
+    pos = min([low.find(t) for t in terms if low.find(t) >= 0] or [0])
+    start = max(0, pos - width // 3)
+    snip = text[start:start + width]
+    return ("…" if start else "") + snip.strip() + ("…" if start + width < len(text) else "")
+
+
+@api.get("/public/libraries/{slug}/search")
+async def search_library(slug: str, q: str = ""):
+    q = q.strip()[:120]
+    if len(q) < 2:
+        return {"query": q, "results": []}
+    data = await library_pages(slug)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Library not found")
+    words = [w for w in re.findall(r"[a-z0-9][a-z0-9\-\.]*", q.lower()) if w not in STOP] or [q.lower()]
+    phrase = q.lower()
+    scored = []
+    for p in data["pages"]:
+        low = p["text"].lower()
+        hits = [low.count(w) for w in words]
+        if not all(hits):
+            continue
+        score = sum(min(h, 5) for h in hits) + (8 if phrase in low else 0) - (4 if p["page"] == 0 else 0)
+        scored.append((score, p))
+    scored.sort(key=lambda x: (-x[0], data["meta"].get(x[1]["flipbook_id"], {}).get("date", "")), reverse=False)
+    results = []
+    for score, p in scored[:30]:
+        m = data["meta"].get(p["flipbook_id"], {})
+        thumbs = data["ready"].get(p["flipbook_id"], {}).get("thumbs", [])
+        results.append({"flipbook_id": p["flipbook_id"], "page": p["page"], "label": m.get("label", ""), "kind": m.get("kind", ""),
+                        "date": m.get("date", ""), "thumb": thumbs[p["page"]] if p["page"] < len(thumbs) else "",
+                        "snippet": make_snippet(p["text"], words), "score": round(score, 1)})
+    return {"query": q, "terms": words, "results": results}
+
+
 @api.get("/files/{path:path}")
 async def serve_file(path: str, request: Request):
     record = await db.files.find_one({"storage_path": path, "is_deleted": False}, {"_id": 0})
@@ -556,6 +802,9 @@ async def startup():
     await db.workspaces.create_index("id", unique=True)
     await db.workspaces.create_index("slug", unique=True)
     await db.members.create_index([("workspace_id", 1), ("user_id", 1)], unique=True)
+    await db.libraries.create_index("slug", unique=True)
+    await db.libraries.create_index("owner_hash")
+    await db.pagetext.create_index([("flipbook_id", 1), ("page", 1)], unique=True)
     try:
         await asyncio.to_thread(store.head_bucket, Bucket=S3_BUCKET)
         logger.info(f"Storage ready (bucket: {S3_BUCKET})")
