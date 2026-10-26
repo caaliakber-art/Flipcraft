@@ -30,7 +30,9 @@ logger = logging.getLogger(__name__)
 
 # S3-compatible storage (Backblaze B2 by default; works with Cloudflare R2 too)
 # B2 endpoint looks like https://s3.us-west-004.backblazeb2.com and its region is the middle part (us-west-004)
-S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
+S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "").strip()
+if S3_ENDPOINT and not S3_ENDPOINT.startswith(("http://", "https://")):
+    S3_ENDPOINT = "https://" + S3_ENDPOINT
 S3_REGION = os.environ.get("S3_REGION") or (re.search(r"s3\.([a-z0-9-]+)\.backblazeb2\.com", S3_ENDPOINT) or [None, "auto"])[1]
 S3_BUCKET = os.environ.get("S3_BUCKET", "flipcraft")
 store = boto3.client(
