@@ -646,9 +646,34 @@ function MobileBrowse({ items, latest, onOpen, onActive, tagline }) {
     if (items[best] && !driving.current) { onActive(items[best]); prefetch(items[best]); }
   }, [items, onActive]);
   useEffect(() => { cur.current = -1; driving.current = false; layout(); }, [layout]);
+  /* Moving the covers like a metro train: pull away gently, gather pace, then ease
+     into the platform. Longer journeys take longer, but never drag. */
+  const anim = useRef(0);
+  const stopAnim = useCallback(() => {
+    if (!anim.current) return;
+    cancelAnimationFrame(anim.current); anim.current = 0;
+    if (ref.current) ref.current.style.scrollSnapType = "x mandatory";
+  }, []);
   const go = (i) => {
     const el = ref.current, ch = el?.children[i];
-    if (ch) el.scrollTo({ left: ch.offsetLeft - (el.clientWidth - ch.offsetWidth) / 2, behavior: reduceMotion() ? "auto" : "smooth" });
+    if (!ch) return;
+    const to = ch.offsetLeft - (el.clientWidth - ch.offsetWidth) / 2;
+    stopAnim();
+    if (reduceMotion()) { el.scrollLeft = to; return; }
+    const from = el.scrollLeft, dist = to - from;
+    const cards = Math.abs(dist) / ch.offsetWidth;
+    if (cards < 0.05) return;
+    const dur = Math.min(1900, 420 + 300 * Math.sqrt(cards));
+    const ease = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+    el.style.scrollSnapType = "none"; // snapping would fight the glide
+    const t0 = performance.now();
+    const step = (now) => {
+      const t = Math.min(1, (now - t0) / dur);
+      el.scrollLeft = from + dist * ease(t);
+      if (t < 1) anim.current = requestAnimationFrame(step);
+      else { anim.current = 0; el.style.scrollSnapType = "x mandatory"; }
+    };
+    anim.current = requestAnimationFrame(step);
   };
   // A wheel pick: the wheels settle at once and the covers sweep across to catch up.
   const pick = (i) => {
@@ -657,7 +682,7 @@ function MobileBrowse({ items, latest, onOpen, onActive, tagline }) {
     setSel(i); onActive(items[i]); prefetch(items[i]);
     go(i);
     clearTimeout(settle.current);
-    settle.current = setTimeout(() => { driving.current = false; }, 1400);
+    settle.current = setTimeout(() => { driving.current = false; }, 2200);
   };
   const onCarousel = () => {
     cancelAnimationFrame(raf.current);
@@ -674,7 +699,7 @@ function MobileBrowse({ items, latest, onOpen, onActive, tagline }) {
   const monthPos = inYear.findIndex(([, i]) => i === sel);
   return (
     <div className="flex flex-col pb-6" data-testid="library-mobile">
-      <div ref={ref} onScroll={onCarousel}
+      <div ref={ref} onScroll={onCarousel} onTouchStart={stopAnim} onPointerDown={stopAnim}
         className="lib-noscroll flex overflow-x-auto pt-4 pb-2" style={{ scrollSnapType: "x mandatory", paddingInline: "calc(50vw - min(23vw, 110px))" }}>
         {items.map((x, i) => (
           <div key={x.flipbook_id} className="shrink-0 w-[46vw] max-w-[220px] px-1.5" style={{ scrollSnapAlign: "center" }}>
