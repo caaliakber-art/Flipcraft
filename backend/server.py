@@ -569,7 +569,7 @@ def guess_issue(name: str) -> dict:
     base = re.sub(r"\.pdf$", "", name, flags=re.I)
     m = re.search(r"(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*[\s_\-.,]*((?:19|20)\d{2})", base, re.I)
     if not m:
-        return {"label": clean_title(base), "date": "", "special": False, "kind": ""}
+        return {"label": clean_title(base), "date": "", "special": True, "kind": "Special edition"}
     month, year = MONTH_ABBR[m.group(1).lower()], int(m.group(2))
     when = f"{MONTH_NAMES[month]} {year}"
     special = not re.search(r"monthly", base, re.I)

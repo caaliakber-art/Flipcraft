@@ -12,7 +12,10 @@ import { playFlip } from "../lib/flipSound";
 const reduceMotion = () => typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
 const monthOf = (it) => (it?.label || "").split(" ")[0];
 const yearOf = (it) => (it?.date || "").slice(0, 4) || (it?.label || "").split(" ").slice(-1)[0];
-const issueName = (it) => (it?.special ? `${it.kind}, ${it.label}` : it?.label || "");
+// Anything without an issue month (a one-off update, a note) is not a monthly issue.
+const undated = (it) => !/^\d{4}-\d{2}$/.test(it?.date || "");
+const headline = (it) => (undated(it) ? it?.label || "" : monthOf(it));
+const issueName = (it) => (it?.special && !undated(it) ? `${it.kind}, ${it.label}` : it?.label || "");
 const shortLabel = (it) => (it?.special ? (it.kind || "Special").replace(/\s*edition$/i, "") : `${monthOf(it).slice(0, 3)} ${yearOf(it).slice(2)}`);
 const WIDE = 1280;
 const isWide = () => window.innerWidth >= WIDE;
@@ -111,7 +114,7 @@ function ShelfCard({ item, onFocus, onOpen, focused, stacked = false }) {
       <Cover src={item.thumb || item.cover} aspect={item.aspect} width="100%" coverRef={target} />
       <div className={`pt-3 pr-2 transition-opacity duration-300 ${stacked ? "opacity-0" : "opacity-100"}`}>
         <div className={`text-[15px] leading-tight ${focused ? "text-white" : "text-white/75"} transition-colors`}>{special ? item.kind : monthOf(item)}</div>
-        <div className="lib-cond text-[12px] text-white/45 mt-0.5">{special ? item.label : `${item.page_count} pages`}</div>
+        <div className="lib-cond text-[12px] text-white/45 mt-0.5 line-clamp-2">{special ? item.label : `${item.page_count} pages`}</div>
       </div>
     </button>
   );
@@ -533,8 +536,9 @@ function MobileBrowse({ items, latest, onOpen, onActive }) {
         <div key={it.flipbook_id} className="lib-swap px-6 pt-4 text-center">
           <p className="text-[14px] text-white/55">{it.special ? it.kind : it.flipbook_id === latest?.flipbook_id ? "Latest issue" : "From the archive"}</p>
           <h1 className="mt-1 leading-none tracking-[-0.03em]">
+            {undated(it) ? <span className="block text-[clamp(24px,7vw,32px)] font-light leading-tight">{it.label}</span> : <>
             <span className="text-[clamp(36px,11vw,48px)] font-light">{monthOf(it)}</span>
-            <span className="ml-2.5 text-[clamp(20px,6vw,26px)] font-light text-[color:var(--mist)]">{yearOf(it)}</span>
+            <span className="ml-2.5 text-[clamp(20px,6vw,26px)] font-light text-[color:var(--mist)]">{yearOf(it)}</span></>}
           </h1>
           <button onClick={() => onOpen(it, ref.current?.children[idx]?.querySelector(".lib-cover"))} className="mt-5 h-12 px-8 rounded-full bg-white text-[color:var(--ink)] text-[15px] font-medium active:scale-[0.98] transition" data-testid="mobile-read">Read {it.special ? "edition" : monthOf(it)}</button>
           <p className="lib-cond mt-3 text-[12.5px] text-white/45">{it.page_count} pages. Swipe for other issues.</p>
@@ -585,7 +589,7 @@ function NextPanel({ next, onOpen, onBack, onSubscribe, subscribed }) {
           <button onClick={() => onOpen(next)} className="mt-4 flex items-end gap-5 text-left group">
             <img src={fileUrl(next.thumb)} alt="" className="w-24 rounded-[3px] shadow-2xl group-hover:-translate-y-1 transition-transform" />
             <span>
-              <span className="block text-[26px] font-light leading-tight">{next.special ? next.kind : monthOf(next)}</span>
+              <span className="block text-[26px] font-light leading-tight">{next.special ? next.kind : headline(next)}</span>
               <span className="block lib-cond text-[13px] text-white/50">{next.label}</span>
             </span>
           </button>
@@ -813,9 +817,11 @@ export default function Library({ embed = false }) {
   const focusTimer = useRef(0);
   const ghost = useRef(null);
   const shelvesRef = useRef(null);
+  const browseRef = useRef(null);
 
   useEffect(() => {
     publicApi.get(`/public/libraries/${slug}`).then((r) => {
+      r.data.items = r.data.items.map((i) => (undated(i) && !i.special ? { ...i, special: true, kind: i.kind || "Special edition" } : i));
       setLib(r.data);
       document.title = r.data.title + (r.data.brand.name ? ` | ${r.data.brand.name}` : "");
       const want = params.get("issue");
@@ -879,7 +885,12 @@ export default function Library({ embed = false }) {
     const first = t === "all" ? null : items.find((it) => topicsOf(it).includes(t));
     if (first) setFocus(first);
     if (spot) closeSpot();
-    setTimeout(() => shelvesRef.current?.scrollIntoView({ behavior: reduceMotion() ? "auto" : "smooth", block: "start" }), 60);
+    setTimeout(() => {
+      const box = browseRef.current, el = shelvesRef.current;
+      if (!box || !el) return;
+      const top = el.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop;
+      if (box.scrollTop < top - 4) box.scrollTo({ top, behavior: reduceMotion() ? "auto" : "smooth" });
+    }, 60);
   };
 
   const onFocus = (it) => { clearTimeout(focusTimer.current); focusTimer.current = setTimeout(() => setFocus(it), 90); };
@@ -1010,14 +1021,15 @@ export default function Library({ embed = false }) {
               <MobileBrowse items={shown} latest={latest} onOpen={(x, el) => fly(x, el)} onActive={setFocus} />
             </main>
           ) : !open ? (
-            <main className={`min-h-0 overflow-y-auto lib-scroll transition-[opacity,filter] duration-300 ${leaving ? "opacity-0 blur-[2px]" : ""}`} data-testid="library-browse">
+            <main ref={browseRef} className={`min-h-0 overflow-y-auto lib-scroll transition-[opacity,filter] duration-300 ${leaving ? "opacity-0 blur-[2px]" : ""}`} data-testid="library-browse">
               {/* hero: the one bold moment */}
               <section className="px-4 sm:px-8 lg:px-12 pt-10 sm:pt-12 pb-6 grid md:grid-cols-[minmax(0,1fr)_auto] gap-8 md:gap-14 items-center min-h-[54vh]" {...hero.bind}>
                 <div key={featured?.flipbook_id} className="lib-swap max-w-xl order-2 md:order-1">
                   <p className="text-[15px] text-white/60">{featured?.special ? featured.kind : featured?.flipbook_id === latest?.flipbook_id ? "Latest issue" : "From the archive"}</p>
                   <h1 className="mt-2 leading-[0.92] tracking-[-0.035em]">
+                    {undated(featured) ? <span className="block text-[clamp(36px,4.6vw,64px)] font-light leading-[1.05] tracking-[-0.02em]">{featured.label}</span> : <>
                     <span className="block text-[clamp(56px,8.5vw,120px)] font-light">{monthOf(featured)}</span>
-                    <span className="block text-[clamp(30px,4vw,56px)] font-light text-[color:var(--mist)]">{yearOf(featured)}</span>
+                    <span className="block text-[clamp(30px,4vw,56px)] font-light text-[color:var(--mist)]">{yearOf(featured)}</span></>}
                   </h1>
                   {featured?.toc?.length > 0 && (
                     <div className="mt-7 space-y-3">
@@ -1045,7 +1057,9 @@ export default function Library({ embed = false }) {
 
               {/* topics + shelves */}
               <div ref={shelvesRef} className="scroll-mt-4">
-                <TopicBar topics={topics} topic={topic} onTopic={pickTopic} total={items.length} className="px-4 sm:px-8 lg:px-12 pb-6" />
+                <div className="lib-topicbar sticky top-0 z-20 pt-3 pb-5 mb-1">
+                  <TopicBar topics={topics} topic={topic} onTopic={pickTopic} total={items.length} className="px-4 sm:px-8 lg:px-12" />
+                </div>
                 <div className="pb-10 space-y-7">
                   {shelves.length === 0 && <p className="px-4 sm:px-8 lg:px-12 text-white/60">No issues under this topic yet.</p>}
                   {shelves.map((row) => {

@@ -256,6 +256,9 @@
 @keyframes lib-lift { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(-14px) scale(0.98); } }
 .lib-spot-bar:focus-within { border-color: rgba(157, 184, 212, 0.6); box-shadow: 0 0 0 4px rgba(157, 184, 212, 0.12), 0 30px 60px -20px rgba(0, 0, 0, 0.7); }
 
+/* topic filters stay in reach while the shelves scroll */
+.lib-topicbar { background: linear-gradient(180deg, rgba(10,22,38,0.92) 0%, rgba(10,22,38,0.75) 70%, transparent); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); }
+
 /* dock rail */
 .lib-dock-item { transition: transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1), margin 220ms; transform-origin: left center; }
 
