@@ -803,6 +803,7 @@ function Reader({ slug, item, items, startPage, embed, onOpen, onBack, onPage, o
   const [seen, setSeen] = useState(() => new Set([0]));
   const [contents, setContents] = useState(false);
   const [sheet, setSheet] = useState(null);
+  const [moving, setMoving] = useState(false); // a page is being turned or dragged
   const flipRef = useRef(null);
   const rootRef = useRef(null);
   const soundRef = useRef(true);
@@ -883,7 +884,7 @@ function Reader({ slug, item, items, startPage, embed, onOpen, onBack, onPage, o
       <div className={`flex-1 min-h-0 ${zoom > 1 ? "overflow-auto lib-scroll" : "overflow-hidden"} flex`}>
         <div className="m-auto shrink-0 p-3 sm:p-6 relative" style={{ width: `${zoom * 100}%`, height: `${zoom * 100}%` }}>
           <div className="relative w-full h-full">
-            <FlipBook key={book.id} ref={flipRef} book={book} accent="#9db8d4" onFlip={onFlip} onReady={onReady} onTurnStart={onTurnStart} />
+            <FlipBook key={book.id} ref={flipRef} book={book} accent="#9db8d4" onFlip={onFlip} onReady={onReady} onTurnStart={onTurnStart} onState={(st) => setMoving(st !== "read")} />
             {/* What sits inside each cover is painted onto the sheet page-flip reveals while a
                 page is lifted, so it is already there mid-turn, then stays put when the turn ends. */}
             {sheet && !portrait && createPortal(
@@ -892,12 +893,12 @@ function Reader({ slug, item, items, startPage, embed, onOpen, onBack, onPage, o
                 <div className="fc-blank-right"><NextPanel next={next} onOpen={() => {}} onBack={() => {}} onSubscribe={() => {}} subscribed={subscribed} /></div>
               </div>, sheet)}
             {blankLeft && (
-              <div className="absolute fc-inside fc-inside-left" style={{ left: rect.left, top: rect.top, width: rect.pageWidth, height: rect.height }}>
+              <div className={`absolute fc-inside fc-inside-left ${moving ? "z-0" : "z-[5]"}`} style={{ left: rect.left, top: rect.top, width: rect.pageWidth, height: rect.height }}>
                 <IssuePanel item={item} onGo={(p) => { const r = flipRef.current?.go(p); if (r != null) setPage(r); setTimeout(measure, 60); }} onStart={() => flipRef.current?.next()} />
               </div>
             )}
             {blankRight && (
-              <div className="absolute fc-inside fc-inside-right" style={{ left: rect.left + rect.pageWidth, top: rect.top, width: rect.pageWidth, height: rect.height }}>
+              <div className={`absolute fc-inside fc-inside-right ${moving ? "z-0" : "z-[5]"}`} style={{ left: rect.left + rect.pageWidth, top: rect.top, width: rect.pageWidth, height: rect.height }}>
                 <NextPanel next={next} onOpen={(it) => onOpen(it, 0)} onBack={onBack} onSubscribe={onSubscribe} subscribed={subscribed} />
               </div>
             )}

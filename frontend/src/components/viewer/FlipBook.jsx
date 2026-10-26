@@ -5,11 +5,11 @@ import { fileUrl } from "../../lib/api";
 import { blankEdges, enlargeCornerCurl, syncMedia, visiblePages } from "../../lib/flipExtras";
 
 // Mounted once per book; page-flip moves the page nodes so this must not re-render its children list.
-export const FlipBook = forwardRef(({ book, accent, onFlip, onReady, onTurnStart }, ref) => {
+export const FlipBook = forwardRef(({ book, accent, onFlip, onReady, onTurnStart, onState }, ref) => {
   const elRef = useRef(null);
   const pfRef = useRef(null);
-  const cb = useRef({ onFlip, onReady, onTurnStart });
-  cb.current = { onFlip, onReady, onTurnStart };
+  const cb = useRef({ onFlip, onReady, onTurnStart, onState });
+  cb.current = { onFlip, onReady, onTurnStart, onState };
 
   useImperativeHandle(ref, () => {
     const turn = (dir) => {
@@ -67,7 +67,7 @@ export const FlipBook = forwardRef(({ book, accent, onFlip, onReady, onTurnStart
       media();
       cb.current.onFlip?.(e.data, visiblePages(pf, total));
     });
-    pf.on("changeState", (e) => e.data === "flipping" && cb.current.onTurnStart?.());
+    pf.on("changeState", (e) => { cb.current.onState?.(e.data); if (e.data === "flipping") cb.current.onTurnStart?.(); });
     pf.on("changeOrientation", () => { blankEdges(pf); soften(); media(); cb.current.onReady?.(pf.getOrientation()); });
     pfRef.current = pf;
     cb.current.onReady?.(pf.getOrientation());
@@ -86,7 +86,7 @@ export const FlipBook = forwardRef(({ book, accent, onFlip, onReady, onTurnStart
   }, [book]);
 
   return (
-    <div ref={elRef} className={`w-full h-full ${book.hard_cover ? "fc-hardcover" : ""}`} data-testid="flipbook-stage">
+    <div ref={elRef} className={`relative z-[1] w-full h-full ${book.hard_cover ? "fc-hardcover" : ""}`} data-testid="flipbook-stage">
       {book.pages.map((p, i) => (
         <div key={p} className="fc-page" data-cover={book.hard_cover && (i === 0 || i === book.pages.length - 1) ? "1" : undefined} data-density={book.hard_cover && (i === 0 || i === book.pages.length - 1) ? "hard" : "soft"} data-testid={`flipbook-page-${i}`}>
           <img src={fileUrl(p)} alt={`Page ${i + 1}`} className="absolute inset-0 w-full h-full object-fill select-none" draggable={false} loading={i < 4 ? "eager" : "lazy"} />
