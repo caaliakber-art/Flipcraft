@@ -281,7 +281,16 @@ async def owned_flipbook(fid: str, ohash: str) -> dict:
     return fb
 
 
+# One conversion at a time keeps memory low on small servers when many PDFs arrive together.
+convert_lock = asyncio.Semaphore(int(os.environ.get("CONVERT_CONCURRENCY", "1")))
+
+
 async def convert_job(fid: str, data: bytes, ohash: str):
+    async with convert_lock:
+        await _convert(fid, data, ohash)
+
+
+async def _convert(fid: str, data: bytes, ohash: str):
     try:
         doc = await asyncio.to_thread(fitz.open, stream=data, filetype="pdf")
         count = doc.page_count
