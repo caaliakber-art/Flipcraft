@@ -24,3 +24,19 @@ services:
         sync: false
       - key: S3_BUCKET
         sync: false
+
+  - type: web
+    name: flipcraft
+    runtime: static
+    rootDir: frontend
+    buildCommand: yarn install --frozen-lockfile && yarn build
+    staticPublishPath: build
+    envVars:
+      - key: REACT_APP_BACKEND_URL
+        value: https://flipcraft-api.onrender.com
+      - key: NODE_VERSION
+        value: "22"
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
