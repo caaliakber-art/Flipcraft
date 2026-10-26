@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { BookOpen, Palette } from "lucide-react";
+import { BookOpen, LogOut, Palette } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "../components/ui/button";
 import { UploadZone } from "../components/UploadZone";
@@ -8,10 +8,12 @@ import { ShareDialog } from "../components/ShareDialog";
 import { BrandDialog } from "../components/BrandDialog";
 import { StatsDialog } from "../components/StatsDialog";
 import { api, errMsg, fileUrl } from "../lib/api";
+import { useAuth } from "../lib/auth";
 
 const EMPTY_BRAND = { name: "", logo: "", color: "#3B82F6", website: "" };
 
 export default function Dashboard() {
+  const { account, logout } = useAuth();
   const [books, setBooks] = useState(null);
   const [brand, setBrand] = useState(EMPTY_BRAND);
   const [share, setShare] = useState(null);
@@ -50,10 +52,17 @@ export default function Dashboard() {
             <div className="w-8 h-8 rounded-md bg-blue-500 grid place-items-center"><BookOpen className="w-4 h-4 text-white" /></div>
             <span className="font-display font-bold text-lg tracking-tight">FlipCraft</span>
           </div>
-          <Button variant="secondary" onClick={() => setBrandOpen(true)} data-testid="open-brand-settings-btn">
-            {brand.logo ? <img src={fileUrl(brand.logo)} alt="" className="w-5 h-5 object-contain mr-2 rounded-sm" /> : <Palette className="w-4 h-4 mr-2" />}
-            {brand.name || "Branding"}
-          </Button>
+          <div className="flex items-center gap-2 sm:gap-3">
+            <div className="hidden sm:block text-right leading-tight" data-testid="workspace-info">
+              <div className="text-sm font-medium">{account?.workspace.name}</div>
+              <div className="text-xs text-slate-500">{account?.user.email} · <span className="text-blue-400">{account?.workspace.plan_label}</span></div>
+            </div>
+            <Button variant="secondary" onClick={() => setBrandOpen(true)} data-testid="open-brand-settings-btn">
+              {brand.logo ? <img src={fileUrl(brand.logo)} alt="" className="w-5 h-5 object-contain mr-2 rounded-sm" /> : <Palette className="w-4 h-4 mr-2" />}
+              {brand.name || "Branding"}
+            </Button>
+            <Button variant="ghost" size="icon" onClick={logout} title="Sign out" data-testid="logout-btn"><LogOut className="w-4 h-4" /></Button>
+          </div>
         </div>
       </header>
 
@@ -62,7 +71,7 @@ export default function Dashboard() {
           <div className="fc-rise">
             <p className="text-xs font-medium tracking-[0.2em] uppercase text-blue-400 mb-4">Your flipbook studio</p>
             <h1 className="font-display text-4xl sm:text-5xl lg:text-6xl font-extrabold tracking-tight leading-[1.05]">PDFs that turn<br />like real pages.</h1>
-            <p className="text-slate-400 mt-5 max-w-md">Upload a PDF, drop videos, pictures and links right onto any page, then share a link or embed it on your site. No sign-up for you or your readers.</p>
+            <p className="text-slate-400 mt-5 max-w-md">Upload a PDF, drop videos, pictures and links right onto any page, then share a link or embed it on your site. Readers never need to sign up.</p>
           </div>
           <div className="fc-rise" style={{ animationDelay: "120ms" }}>
             <UploadZone onCreated={(b) => setBooks((l) => [b, ...(l || [])])} />

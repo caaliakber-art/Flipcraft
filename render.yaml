@@ -13,6 +13,8 @@ services:
         value: "3.13"
       - key: DB_NAME
         value: flipcraft
+      - key: DEMO_ACCOUNTS
+        value: aliakber@sdu.works
       - key: MONGO_URL
         sync: false
       - key: CORS_ORIGINS

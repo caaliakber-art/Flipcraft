@@ -106,7 +106,7 @@ export default function Editor() {
   if (book === null) return <div className="min-h-screen grid place-items-center"><Loader2 className="w-8 h-8 animate-spin text-slate-500" /></div>;
   if (book === false || !book.is_owner) return (
     <div className="min-h-screen grid place-items-center text-center px-6" data-testid="editor-no-access">
-      <div className="space-y-4"><p className="text-slate-300">You can't edit this flipbook from this browser.</p><p className="text-sm text-slate-500">Open Branding on the home page and paste your studio key to restore access.</p><Button asChild><Link to="/">Go home</Link></Button></div>
+      <div className="space-y-4"><p className="text-slate-300">This flipbook belongs to another workspace.</p><p className="text-sm text-slate-500">Sign in with an account in that workspace to edit it.</p><Button asChild><Link to="/">Go home</Link></Button></div>
     </div>
   );
 

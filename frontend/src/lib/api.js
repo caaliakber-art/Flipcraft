@@ -1,26 +1,31 @@
 import axios from "axios";
 
 export const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
-const KEY = "flipcraft_studio_key";
+const TOKEN = "flipcraft_token";
 
-export function getStudioKey() {
-  let k = localStorage.getItem(KEY);
-  if (!k) {
-    const a = new Uint8Array(24);
-    crypto.getRandomValues(a);
-    k = Array.from(a, (b) => b.toString(16).padStart(2, "0")).join("");
-    localStorage.setItem(KEY, k);
-  }
-  return k;
-}
-
-export const setStudioKey = (k) => localStorage.setItem(KEY, k);
+export const getToken = () => {
+  try { return localStorage.getItem(TOKEN); } catch { return null; }
+};
+export const setToken = (t) => {
+  try { t ? localStorage.setItem(TOKEN, t) : localStorage.removeItem(TOKEN); } catch { /* storage blocked */ }
+};
 
 export const api = axios.create({ baseURL: API });
 api.interceptors.request.use((c) => {
-  c.headers["X-Owner-Key"] = getStudioKey();
+  const t = getToken();
+  if (t) c.headers.Authorization = `Bearer ${t}`;
   return c;
 });
+api.interceptors.response.use(
+  (r) => r,
+  (e) => {
+    if (e?.response?.status === 401 && !/\/auth\//.test(e.config?.url || "")) {
+      setToken(null);
+      if (!/^\/(login|signup)/.test(window.location.pathname)) window.location.assign("/login");
+    }
+    return Promise.reject(e);
+  }
+);
 
 export const publicApi = axios.create({ baseURL: API });
 
@@ -37,8 +42,8 @@ export function visitorId() {
 
 export function track(id, body) {
   try {
-    const owner = localStorage.getItem(KEY);
-    publicApi.post(`/flipbooks/${id}/track`, { visitor: visitorId(), ...body }, { headers: owner ? { "X-Owner-Key": owner } : {} }).catch(() => {});
+    const t = getToken();
+    publicApi.post(`/flipbooks/${id}/track`, { visitor: visitorId(), ...body }, { headers: t ? { Authorization: `Bearer ${t}` } : {} }).catch(() => {});
   } catch {
     /* storage blocked in some embeds */
   }

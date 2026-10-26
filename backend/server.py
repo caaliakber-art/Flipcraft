@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, UploadFile, File, Form, Header, HTTPException, BackgroundTasks, Request
+from fastapi import FastAPI, APIRouter, UploadFile, File, Form, Header, HTTPException, BackgroundTasks, Request, Depends
 from fastapi.responses import FileResponse, StreamingResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -16,6 +16,9 @@ import re
 import uuid
 
 import pymupdf as fitz
+import bcrypt
+import jwt
+import secrets
 import boto3
 from botocore.config import Config as BotoConfig
 
@@ -69,10 +72,84 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
-def owner_hash(key: Optional[str]) -> str:
-    if not key or len(key) < 32 or len(key) > 128:
-        raise HTTPException(status_code=401, detail="Missing or invalid studio key")
-    return hashlib.sha256(key.encode()).hexdigest()
+# ---------------------------------------------------------------- accounts
+# Each customer is a workspace. Everything a workspace owns (flipbooks, files,
+# branding, stats) is tagged owner_hash = "ws:<workspace id>".
+
+TERMS_VERSION = "2026-10-26"
+TOKEN_DAYS = 30
+JWT_SECRET: Optional[str] = os.environ.get("JWT_SECRET") or None
+
+PLANS = {
+    "free":     {"label": "Free",      "flipbooks": 3,    "libraries": 0, "embed": True, "ai_search": False, "storage_mb": 200,   "remove_badge": False},
+    "premium":  {"label": "Premium",   "flipbooks": 50,   "libraries": 3, "embed": True, "ai_search": True,  "storage_mb": 5000,  "remove_badge": True},
+    "pro_plus": {"label": "Pro Plus",  "flipbooks": None, "libraries": None, "embed": True, "ai_search": True, "storage_mb": 50000, "remove_badge": True},
+    "demo":     {"label": "Free demo", "flipbooks": None, "libraries": None, "embed": True, "ai_search": True, "storage_mb": 50000, "remove_badge": True},
+}
+# Accounts that get the full-feature demo plan on sign-up (comma separated emails)
+DEMO_ACCOUNTS = {e.strip().lower() for e in os.environ.get("DEMO_ACCOUNTS", "").split(",") if e.strip()}
+
+
+def ws_owner(workspace_id: str) -> str:
+    return f"ws:{workspace_id}"
+
+
+def make_token(user_id: str, workspace_id: str) -> str:
+    exp = datetime.now(timezone.utc) + timedelta(days=TOKEN_DAYS)
+    return jwt.encode({"uid": user_id, "ws": workspace_id, "exp": exp}, JWT_SECRET, algorithm="HS256")
+
+
+def read_token(authorization: Optional[str]) -> Optional[dict]:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        return None
+    try:
+        return jwt.decode(authorization[7:].strip(), JWT_SECRET, algorithms=["HS256"])
+    except jwt.PyJWTError:
+        return None
+
+
+async def require_owner(authorization: Optional[str] = Header(None)) -> str:
+    claims = read_token(authorization)
+    if not claims:
+        raise HTTPException(status_code=401, detail="Please sign in again")
+    return ws_owner(claims["ws"])
+
+
+def optional_owner(authorization: Optional[str]) -> Optional[str]:
+    claims = read_token(authorization)
+    return ws_owner(claims["ws"]) if claims else None
+
+
+def slugify(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:40] or "workspace"
+
+
+class SignupIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    email: str = Field(max_length=200, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+    password: str = Field(min_length=8, max_length=128)
+    workspace: str = Field(min_length=1, max_length=80)
+    accept_terms: bool
+
+    @field_validator("accept_terms")
+    @classmethod
+    def must_accept(cls, v):
+        if not v:
+            raise ValueError("Please accept the Terms of Service and Privacy Policy")
+        return v
+
+
+class LoginIn(BaseModel):
+    email: str = Field(max_length=200)
+    password: str = Field(max_length=128)
+
+
+async def account_view(user: dict, ws: dict) -> dict:
+    plan = PLANS.get(ws.get("plan", "free"), PLANS["free"])
+    return {
+        "user": {"id": user["id"], "name": user["name"], "email": user["email"]},
+        "workspace": {"id": ws["id"], "name": ws["name"], "slug": ws["slug"], "plan": ws.get("plan", "free"), "plan_label": plan["label"], "limits": plan},
+    }
 
 
 async def store_file(data: bytes, content_type: str, ext: str, folder: str, ohash: str, name: str = "", private: bool = False) -> str:
@@ -230,22 +307,69 @@ async def root():
     return {"message": "FlipCraft API"}
 
 
+@api.post("/auth/signup")
+async def signup(body: SignupIn):
+    email = body.email.strip().lower()
+    if await db.users.find_one({"email": email}, {"_id": 1}):
+        raise HTTPException(status_code=409, detail="An account with this email already exists. Please sign in.")
+    base = slugify(body.workspace)
+    slug, n = base, 1
+    while await db.workspaces.find_one({"slug": slug}, {"_id": 1}):
+        n += 1
+        slug = f"{base}-{n}"
+    now = now_iso()
+    user = {"id": uuid.uuid4().hex, "name": body.name.strip(), "email": email,
+            "password_hash": bcrypt.hashpw(body.password.encode(), bcrypt.gensalt()).decode(),
+            "terms_version": TERMS_VERSION, "terms_accepted_at": now, "created_at": now}
+    ws = {"id": uuid.uuid4().hex, "name": body.workspace.strip(), "slug": slug,
+          "plan": "demo" if email in DEMO_ACCOUNTS else "free", "owner_user_id": user["id"], "created_at": now}
+    try:
+        await db.users.insert_one(dict(user))
+    except DuplicateKeyError:
+        raise HTTPException(status_code=409, detail="An account with this email already exists. Please sign in.")
+    await db.workspaces.insert_one(dict(ws))
+    await db.members.insert_one({"workspace_id": ws["id"], "user_id": user["id"], "role": "owner", "created_at": now})
+    return {"token": make_token(user["id"], ws["id"]), **(await account_view(user, ws))}
+
+
+@api.post("/auth/login")
+async def login(body: LoginIn):
+    user = await db.users.find_one({"email": body.email.strip().lower()}, {"_id": 0})
+    if not user or not bcrypt.checkpw(body.password.encode(), user["password_hash"].encode()):
+        raise HTTPException(status_code=401, detail="Email or password is incorrect")
+    member = await db.members.find_one({"user_id": user["id"]}, {"_id": 0})
+    ws = await db.workspaces.find_one({"id": member["workspace_id"]}, {"_id": 0}) if member else None
+    if not ws:
+        raise HTTPException(status_code=403, detail="No workspace is linked to this account")
+    return {"token": make_token(user["id"], ws["id"]), **(await account_view(user, ws))}
+
+
+@api.get("/auth/me")
+async def me(authorization: Optional[str] = Header(None)):
+    claims = read_token(authorization)
+    if not claims:
+        raise HTTPException(status_code=401, detail="Please sign in again")
+    user = await db.users.find_one({"id": claims["uid"]}, {"_id": 0})
+    ws = await db.workspaces.find_one({"id": claims["ws"]}, {"_id": 0})
+    if not user or not ws:
+        raise HTTPException(status_code=401, detail="Please sign in again")
+    return await account_view(user, ws)
+
+
 @api.get("/brand")
-async def read_brand(x_owner_key: str = Header(None)):
-    brand = await get_brand(owner_hash(x_owner_key))
+async def read_brand(ohash: str = Depends(require_owner)):
+    brand = await get_brand(ohash)
     return Brand(**brand).model_dump() if brand else Brand().model_dump()
 
 
 @api.put("/brand")
-async def save_brand(body: Brand, x_owner_key: str = Header(None)):
-    ohash = owner_hash(x_owner_key)
+async def save_brand(body: Brand, ohash: str = Depends(require_owner)):
     await db.brands.update_one({"owner_hash": ohash}, {"$set": {**body.model_dump(), "owner_hash": ohash}}, upsert=True)
     return body.model_dump()
 
 
 @api.post("/flipbooks")
-async def create_flipbook(background: BackgroundTasks, file: UploadFile = File(...), title: str = Form(""), x_owner_key: str = Header(None)):
-    ohash = owner_hash(x_owner_key)
+async def create_flipbook(background: BackgroundTasks, file: UploadFile = File(...), title: str = Form(""), ohash: str = Depends(require_owner)):
     data = await file.read()
     if len(data) > MAX_PDF:
         raise HTTPException(status_code=413, detail="PDF is larger than 100 MB")
@@ -268,8 +392,7 @@ async def create_flipbook(background: BackgroundTasks, file: UploadFile = File(.
 
 
 @api.get("/flipbooks")
-async def list_flipbooks(x_owner_key: str = Header(None)):
-    ohash = owner_hash(x_owner_key)
+async def list_flipbooks(ohash: str = Depends(require_owner)):
     brand = await get_brand(ohash)
     items = await db.flipbooks.find({"owner_hash": ohash, "is_deleted": False}, {"_id": 0}).sort("created_at", -1).to_list(500)
     stats = {s["flipbook_id"]: s.get("views", 0) async for s in db.stats.find({"flipbook_id": {"$in": [f["id"] for f in items]}}, {"_id": 0, "flipbook_id": 1, "views": 1})}
@@ -277,11 +400,11 @@ async def list_flipbooks(x_owner_key: str = Header(None)):
 
 
 @api.post("/flipbooks/{fid}/track")
-async def track(fid: str, body: TrackEvent, x_owner_key: str = Header(None)):
+async def track(fid: str, body: TrackEvent, authorization: Optional[str] = Header(None)):
     fb = await db.flipbooks.find_one({"id": fid, "is_deleted": False}, {"_id": 0, "owner_hash": 1, "page_count": 1})
     if not fb:
         raise HTTPException(status_code=404, detail="Flipbook not found")
-    if x_owner_key and 32 <= len(x_owner_key) <= 128 and owner_hash(x_owner_key) == fb["owner_hash"]:
+    if optional_owner(authorization) == fb["owner_hash"]:
         return {"ok": True, "skipped": "owner"}
     inc = {f"pages.{p}": 1 for p in body.pages if 0 <= p < fb.get("page_count", 0)}
     if body.open:
@@ -299,8 +422,8 @@ async def track(fid: str, body: TrackEvent, x_owner_key: str = Header(None)):
 
 
 @api.get("/flipbooks/{fid}/stats")
-async def get_stats(fid: str, x_owner_key: str = Header(None)):
-    fb = await owned_flipbook(fid, owner_hash(x_owner_key))
+async def get_stats(fid: str, ohash: str = Depends(require_owner)):
+    fb = await owned_flipbook(fid, ohash)
     s = await db.stats.find_one({"flipbook_id": fid}, {"_id": 0}) or {}
     today = datetime.now(timezone.utc).date()
     days = s.get("days", {})
@@ -314,18 +437,17 @@ async def get_stats(fid: str, x_owner_key: str = Header(None)):
 
 
 @api.get("/flipbooks/{fid}")
-async def get_flipbook(fid: str, x_owner_key: str = Header(None)):
+async def get_flipbook(fid: str, authorization: Optional[str] = Header(None)):
     fb = await db.flipbooks.find_one({"id": fid, "is_deleted": False}, {"_id": 0})
     if not fb:
         raise HTTPException(status_code=404, detail="Flipbook not found")
     view = public_view(fb, await get_brand(fb["owner_hash"]))
-    view["is_owner"] = bool(x_owner_key) and 32 <= len(x_owner_key) <= 128 and owner_hash(x_owner_key) == fb["owner_hash"]
+    view["is_owner"] = optional_owner(authorization) == fb["owner_hash"]
     return view
 
 
 @api.put("/flipbooks/{fid}")
-async def update_flipbook(fid: str, body: FlipbookUpdate, x_owner_key: str = Header(None)):
-    ohash = owner_hash(x_owner_key)
+async def update_flipbook(fid: str, body: FlipbookUpdate, ohash: str = Depends(require_owner)):
     fb = await owned_flipbook(fid, ohash)
     changes = {k: v for k, v in body.model_dump(exclude_none=True).items()}
     if body.overlays is not None:
@@ -339,8 +461,7 @@ async def update_flipbook(fid: str, body: FlipbookUpdate, x_owner_key: str = Hea
 
 
 @api.delete("/flipbooks/{fid}")
-async def delete_flipbook(fid: str, x_owner_key: str = Header(None)):
-    ohash = owner_hash(x_owner_key)
+async def delete_flipbook(fid: str, ohash: str = Depends(require_owner)):
     await owned_flipbook(fid, ohash)
     await db.flipbooks.update_one({"id": fid}, {"$set": {"is_deleted": True}})
     await db.files.update_many({"storage_path": {"$regex": f"^{APP_NAME}/pages/{fid}/"}}, {"$set": {"is_deleted": True}})
@@ -348,8 +469,7 @@ async def delete_flipbook(fid: str, x_owner_key: str = Header(None)):
 
 
 @api.post("/media")
-async def upload_media(file: UploadFile = File(...), x_owner_key: str = Header(None)):
-    ohash = owner_hash(x_owner_key)
+async def upload_media(file: UploadFile = File(...), ohash: str = Depends(require_owner)):
     ctype = (file.content_type or "").lower()
     if ctype in IMAGE_TYPES:
         kind, ext, limit = "image", IMAGE_TYPES[ctype], MAX_IMAGE
@@ -420,6 +540,22 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup():
+    global JWT_SECRET
+    if not JWT_SECRET:
+        # one stable signing secret per deployment, kept in the database
+        doc = await db.settings.find_one({"_id": "jwt_secret"})
+        if not doc:
+            try:
+                await db.settings.insert_one({"_id": "jwt_secret", "value": secrets.token_urlsafe(48)})
+            except DuplicateKeyError:
+                pass
+            doc = await db.settings.find_one({"_id": "jwt_secret"})
+        JWT_SECRET = doc["value"]
+    await db.users.create_index("email", unique=True)
+    await db.users.create_index("id", unique=True)
+    await db.workspaces.create_index("id", unique=True)
+    await db.workspaces.create_index("slug", unique=True)
+    await db.members.create_index([("workspace_id", 1), ("user_id", 1)], unique=True)
     try:
         await asyncio.to_thread(store.head_bucket, Bucket=S3_BUCKET)
         logger.info(f"Storage ready (bucket: {S3_BUCKET})")
