@@ -420,7 +420,7 @@ export default function Library({ embed = false }) {
           <button onClick={back} className="text-[16px] sm:text-[17px] font-normal tracking-[-0.01em] truncate hover:text-white text-white/90" data-testid="library-title">{lib.title}</button>
           <div className="ml-auto flex items-center gap-2">
             {open && <button onClick={back} className="h-9 px-4 rounded-full text-[14px] text-white/80 hover:bg-white/10 flex items-center gap-2" data-testid="library-back"><ArrowLeft className="w-4 h-4" /><span className="hidden sm:inline">All issues</span></button>}
-            <button onClick={() => setSearchSheet(true)} className="xl:hidden h-9 w-9 grid place-items-center rounded-full hover:bg-white/10" aria-label="Search"><Search className="w-4 h-4" /></button>
+            {items.length > 0 && <button onClick={() => setSearchSheet(true)} className="xl:hidden h-9 w-9 grid place-items-center rounded-full hover:bg-white/10" aria-label="Search"><Search className="w-4 h-4" /></button>}
           </div>
         </div>
         {brand.stripe ? <img src={fileUrl(brand.stripe)} alt="" className="h-[5px] w-full object-cover object-left opacity-30 brightness-0 invert" aria-hidden="true" /> : <div className="h-px bg-white/10" />}
@@ -428,7 +428,15 @@ export default function Library({ embed = false }) {
 
       {/* body */}
       <div className="relative z-10 flex-1 min-h-0 grid xl:grid-cols-[minmax(0,1fr)_360px] gap-0 xl:gap-6 xl:pr-6">
-        {!open ? (
+        {items.length === 0 ? (
+          <main className="min-h-0 grid place-items-center px-6 text-center" data-testid="library-empty">
+            <div className="max-w-md lib-swap">
+              <p className="text-[15px] text-white/55">{lib.title}</p>
+              <h1 className="mt-2 text-[clamp(32px,4vw,48px)] font-light leading-tight tracking-[-0.02em]">No issues published yet</h1>
+              <p className="mt-4 text-[15px] text-white/60 leading-relaxed">Issues appear here as soon as they're added to this library.</p>
+            </div>
+          </main>
+        ) : !open ? (
           <main className="min-h-0 overflow-y-auto lib-scroll" data-testid="library-browse">
             {/* hero: the one bold moment */}
             <section className="px-4 sm:px-8 lg:px-12 pt-10 sm:pt-12 pb-6 grid md:grid-cols-[minmax(0,1fr)_auto] gap-8 md:gap-14 items-center min-h-[54vh]" {...hero.bind}>
@@ -487,7 +495,7 @@ export default function Library({ embed = false }) {
             <Reader slug={slug} item={open} items={items} startPage={startPage} embed={embed} onOpen={openIssue} onBack={back} />
           </main>
         )}
-        <div className="hidden xl:block min-h-0 py-6"><SearchPanel slug={slug} lib={lib} current={open} onOpen={openIssue} /></div>
+        <div className={`${items.length ? "hidden xl:block" : "hidden"} min-h-0 py-6`}><SearchPanel slug={slug} lib={lib} current={open} onOpen={openIssue} /></div>
       </div>
 
       {searchSheet && (
