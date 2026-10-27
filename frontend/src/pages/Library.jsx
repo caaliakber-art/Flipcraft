@@ -505,6 +505,14 @@ function ShareSheet({ slug, lib, item, page = 0, head = null, onClose }) {
     return `${API}/share/${slug}?${q.toString()}`;
   };
   const full = (via) => `${text}\n${link(via)}`;
+  // Draw the preview card now, so it is ready by the time WhatsApp or LinkedIn asks for it.
+  useEffect(() => {
+    const q = new URLSearchParams();
+    if (item) q.set("issue", item.flipbook_id);
+    if (item && pick) q.set("h", String(pick.idx));
+    const im = new Image();
+    im.src = `${API}/og/${slug}.jpg${q.toString() ? `?${q}` : ""}`;
+  }, [slug, item, pick]);
   const open = (href) => window.open(href, "_blank", "noopener,noreferrer");
   const copy = async () => { await copyText(link("copy")); setCopied(true); setTimeout(() => setCopied(false), 1800); };
   const native = typeof navigator !== "undefined" && navigator.share;

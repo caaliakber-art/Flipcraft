@@ -865,7 +865,8 @@ async def share_page(slug: str, request: Request, issue: str = "", page: int = 0
         q["via"] = via
     target = f"{FRONTEND_URL}/library/{slug}" + (f"?{urlencode(q)}" if q else "")
     img_q = {k: v for k, v in q.items() if k in ("issue", "h")}
-    image = f"{public_base(request)}/api/og/{slug}.png" + (f"?{urlencode(img_q)}" if img_q else "")
+    image = f"{public_base(request)}/api/og/{slug}.jpg" + (f"?{urlencode(img_q)}" if img_q else "")
+    asyncio.create_task(og_bytes(slug, img_q.get("issue", ""), int(img_q.get("h", -1))))  # have it ready when the crawler asks
     e = lambda v: hx.escape(v, quote=True)
     body = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <title>{e(title)}</title>
@@ -873,7 +874,7 @@ async def share_page(slug: str, request: Request, issue: str = "", page: int = 0
 <meta property="og:type" content="article"><meta property="og:site_name" content="{e(brand or view['title'])}">
 <meta property="og:title" content="{e(title)}">
 <meta property="og:description" content="{e(desc)}"><meta property="og:url" content="{e(target)}">
-<meta property="og:image" content="{e(image)}"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="627">
+<meta property="og:image" content="{e(image)}"><meta property="og:image:secure_url" content="{e(image)}"><meta property="og:image:type" content="image/jpeg"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="627">
 <meta name="twitter:card" content="summary_large_image"><meta name="twitter:image" content="{e(image)}">
 <meta http-equiv="refresh" content="0;url={e(target)}">
 </head><body><p><a href="{e(target)}">Open {e(view['title'])}</a></p>
@@ -986,19 +987,30 @@ def render_og(brand: dict, lib_title: str, pitch: str, kicker: str, headline: st
     elif pitch:
         d.text((left, fy), pitch, font=f("Regular", 22), fill=mist)
     out = io.BytesIO()
-    img.save(out, "PNG", optimize=True)
+    img.save(out, "JPEG", quality=84, optimize=True, progressive=True)  # small: WhatsApp drops slow or heavy previews
     return out.getvalue()
 
 
-@api.get("/og/{slug}.png")
-async def og_card(slug: str, issue: str = "", h: int = -1):
+async def og_bytes(slug: str, issue: str = "", h: int = -1) -> Optional[bytes]:
+    """The preview card, from memory, then from storage (survives the free server
+    sleeping), and only drawn when neither has it."""
     lib = await db.libraries.find_one({"slug": slug, "is_deleted": False}, {"_id": 0})
     if not lib:
-        raise HTTPException(status_code=404, detail="Library not found")
+        return None
     view = await library_view(lib, public=True)
     brand = view["brand"]
     it = next((i for i in view["items"] if i["flipbook_id"] == issue), None) or next((i for i in view["items"] if not i.get("special")), None)
-    key = f"{slug}:{issue}:{it and it['flipbook_id']}:{h}:{view.get('pitch_title')}:{brand.get('logo')}:{brand.get('color')}"
+    key = f"v2:{slug}:{issue}:{it and it['flipbook_id']}:{h}:{view.get('pitch_title')}:{brand.get('logo')}:{brand.get('color')}"
+    stored = f"og/{hashlib.sha1(key.encode()).hexdigest()}.jpg"
+    if key not in og_cache:
+        local = CACHE_DIR / hashlib.sha1(stored.encode()).hexdigest()
+        if local.exists() or await asyncio.to_thread(lambda: _exists(stored)):
+            try:
+                if not local.exists():
+                    await asyncio.to_thread(download_to, stored, local)
+                og_cache[key] = local.read_bytes()
+            except Exception:
+                pass
     if key not in og_cache:
         kicker, headline, sub = view["title"], view["title"], view.get("pitch_text") or ""
         if it:
@@ -1014,9 +1026,31 @@ async def og_card(slug: str, issue: str = "", h: int = -1):
         cover = await cached_local(it["cover"]) if it else None
         logo = await cached_local(brand.get("logo") or "")
         og_cache[key] = await asyncio.to_thread(render_og, brand, view["title"], view.get("pitch_title") or "", kicker, headline, sub, cover, logo)
+        try:
+            await asyncio.to_thread(put_object, stored, og_cache[key], "image/jpeg")
+        except Exception:
+            logger.warning("Could not store preview card %s", stored)
         if len(og_cache) > 300:
             og_cache.pop(next(iter(og_cache)))
-    return Response(og_cache[key], media_type="image/png", headers={"Cache-Control": "public, max-age=3600"})
+    return og_cache[key]
+
+
+def _exists(path: str) -> bool:
+    try:
+        store.head_object(Bucket=S3_BUCKET, Key=path)
+        return True
+    except Exception:
+        return False
+
+
+@api.get("/og/{slug}.{ext}")
+async def og_card(slug: str, ext: str, issue: str = "", h: int = -1):
+    if ext not in ("jpg", "png"):
+        raise HTTPException(status_code=404, detail="Not found")
+    data = await og_bytes(slug, issue, h)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Library not found")
+    return Response(data, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=86400"})
 
 
 # ---------------------------------------------------------------- dates to act on
