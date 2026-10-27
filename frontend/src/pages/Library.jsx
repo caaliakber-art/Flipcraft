@@ -1286,7 +1286,63 @@ function Reader({ slug, lib, item, items, startPage, embed, onOpen, onBack, onPa
 
 /* Left rail while reading: every issue, labelled, magnifying under the pointer
    like the Mac dock, with the full name shown beside the one you're on. */
-function DockRail({ items, current, onOpen }) {
+/* ------------------------------------------------------------------ shelves
+   A small round button in the corner. Hover (or tap) and the library's shelves fan
+   out as a stack of cards, each topped by its latest cover. Pick one and it turns,
+   drops into the stack under the button, and the library switches to that shelf. */
+const SHELF_WORD = { monthly: "issue", special: "edition", articles: "article", presentations: "item" };
+const shelfCount = (s) => `${s.count} ${SHELF_WORD[s.id] || "item"}${s.count === 1 ? "" : "s"}`;
+
+function ShelfSwitcher({ shelves, current, items, onPick, dir = "up", className = "" }) {
+  const [open, setOpen] = useState(false);
+  const [picked, setPicked] = useState(null);
+  const timer = useRef(0);
+  const pickTimer = useRef(0);
+  const root = useRef(null);
+  const cur = shelves.find((x) => x.id === current) || shelves[0];
+  const cover = (id) => items.find((i) => i.shelf === id)?.thumb;
+  // the current shelf sits on top of the stack; the others fan out behind it in order
+  const order = [cur, ...shelves.filter((x) => x.id !== cur.id)];
+  useEffect(() => {
+    if (!open) return undefined;
+    const away = (e) => { if (!root.current?.contains(e.target)) setOpen(false); };
+    const esc = (e) => e.key === "Escape" && setOpen(false);
+    document.addEventListener("pointerdown", away); window.addEventListener("keydown", esc);
+    return () => { document.removeEventListener("pointerdown", away); window.removeEventListener("keydown", esc); };
+  }, [open]);
+  useEffect(() => () => { clearTimeout(timer.current); clearTimeout(pickTimer.current); }, []);
+  const enter = () => { clearTimeout(timer.current); if (window.matchMedia("(hover: hover)").matches) setOpen(true); };
+  const leave = () => { if (picked) return; clearTimeout(timer.current); timer.current = setTimeout(() => setOpen(false), 280); };
+  const pick = (id) => {
+    if (picked) return;
+    if (id === cur.id) { setOpen(false); return; }
+    setPicked(id);
+    clearTimeout(timer.current);
+    pickTimer.current = setTimeout(() => { setPicked(null); setOpen(false); onPick(id); }, reduceMotion() ? 0 : 430);
+  };
+  return (
+    <div ref={root} className={`lib-shelfsw ${className}`} data-dir={dir} data-open={open ? "1" : "0"} onMouseEnter={enter} onMouseLeave={leave} data-testid="shelf-switcher">
+      <button onClick={() => setOpen((v) => !v)} aria-expanded={open} aria-label={`Shelf: ${cur.name}. Show other shelves`} className="lib-shelfsw-btn" data-testid="shelf-button">
+        <span className="lib-shelfsw-glyph" aria-hidden="true"><i /><i /><i /></span>
+      </button>
+      <div className="lib-shelfsw-fan" role="menu" aria-label="Shelves" style={{ "--n": order.length }}>
+        {order.map((x, i) => (
+          <button key={x.id} role="menuitemradio" aria-checked={x.id === cur.id} tabIndex={open ? 0 : -1} onClick={() => pick(x.id)}
+            className={`lib-shelfcard ${x.id === cur.id ? "is-current" : ""} ${picked === x.id ? "is-picked" : picked ? "is-other" : ""}`}
+            style={{ "--i": i, "--n": order.length, zIndex: picked === x.id ? 50 : order.length - i }} data-testid={`shelf-card-${x.id}`}>
+            <span className="lib-shelfcard-cover">{cover(x.id) ? <img src={fileUrl(cover(x.id))} alt="" /> : null}</span>
+            <span className="lib-shelfcard-text">
+              <span className="block text-[14px] font-medium leading-tight">{x.name}</span>
+              <span className="lib-cond block text-[12px] text-white/55 mt-0.5">{shelfCount(x)}{x.id === cur.id ? ", showing" : ""}</span>
+            </span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function DockRail({ items, current, onOpen, switcher = null }) {
   const ref = useRef(null);
   const [tip, setTip] = useState(null);
   const move = (e) => {
@@ -1308,7 +1364,8 @@ function DockRail({ items, current, onOpen }) {
   }, [current]);
   return (
     <>
-      <nav ref={ref} onMouseMove={move} onMouseLeave={leave} onScroll={() => setTip(null)} className="h-full overflow-y-auto overflow-x-hidden lib-noscroll py-5 pl-4 pr-2 flex flex-col gap-3 items-start" aria-label="All issues">
+      {switcher && <div className="relative z-30 pt-4 pl-4 pb-1">{switcher}</div>}
+      <nav ref={ref} onMouseMove={move} onMouseLeave={leave} onScroll={() => setTip(null)} className={`${switcher ? "h-[calc(100%-64px)]" : "h-full"} overflow-y-auto overflow-x-hidden lib-noscroll py-5 pl-4 pr-2 flex flex-col gap-3 items-start`} aria-label="All issues">
         {items.map((it) => {
           const on = it.flipbook_id === current;
           return (
@@ -1427,6 +1484,7 @@ export default function Library({ embed = false }) {
   const [readPage, setReadPage] = useState(null);
   const [activeRow, setActiveRow] = useState(null);
   const [topic, setTopic] = useState("all");
+  const [shelf, setShelf] = useState(() => params.get("shelf") || "");
   const [leaving, setLeaving] = useState(false);
   const [subOpen, setSubOpen] = useState(false); // false | "subscribe" | "credentials"
   const [shareOf, setShareOf] = useState(null); // null | { item, page, head }
@@ -1447,16 +1505,25 @@ export default function Library({ embed = false }) {
       document.title = r.data.title + (r.data.brand.name ? ` | ${r.data.brand.name}` : "");
       const want = params.get("issue");
       const it = r.data.items.find((i) => i.flipbook_id === want);
-      if (it) { setOpen(it); setStartPage(Math.max(0, (parseInt(params.get("page"), 10) || 1) - 1)); }
+      if (it) { setOpen(it); setShelf(it.shelf || "monthly"); setStartPage(Math.max(0, (parseInt(params.get("page"), 10) || 1) - 1)); }
     }).catch(() => setError("This library isn't available. Check the link, or ask the publisher for a new one."));
   }, [slug]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const items = useMemo(() => lib?.items || [], [lib]);
+  const all = useMemo(() => lib?.items || [], [lib]);
+  const shelfList = useMemo(() => (lib?.shelves || []).filter((x) => x.count > 0), [lib]);
+  const curShelf = shelfList.find((x) => x.id === shelf)?.id || shelfList[0]?.id || "monthly";
+  const items = useMemo(() => (shelfList.length ? all.filter((i) => (i.shelf || "monthly") === curShelf) : all), [all, curShelf, shelfList.length]);
+  const pickShelf = (id) => {
+    setShelf(id); setTopic("all"); setFocus(null); setActiveRow(null);
+    setParams((p) => { if (id === shelfList[0]?.id) p.delete("shelf"); else p.set("shelf", id); return p; }, { replace: true });
+    browseRef.current?.scrollTo({ top: 0, behavior: reduceMotion() ? "auto" : "smooth" });
+  };
+  const switcher = (dir, cls) => (shelfList.length > 1 ? <ShelfSwitcher key={curShelf} shelves={shelfList} current={curShelf} items={all} onPick={(id) => { pickShelf(id); if (open) { const first = all.find((i) => i.shelf === id); if (first) openIssue(first, 0); } }} dir={dir} className={cls} /> : null);
   const topics = useMemo(() => {
     const c = {};
     items.forEach((it) => topicsOf(it).forEach((t) => { c[t] = (c[t] || 0) + 1; }));
     const order = TOPIC_RULES.map(([t]) => t);
-    return Object.entries(c).filter(([t, n]) => n >= 2 || order.includes(t) || t === "Special editions")
+    return Object.entries(c).filter(([t, n]) => t !== "Special editions" && (n >= 2 || order.includes(t)))
       .sort((a, b) => {
         const ia = a[0] === "Special editions" ? 99 : order.indexOf(a[0]), ib = b[0] === "Special editions" ? 99 : order.indexOf(b[0]);
         return (ia < 0 ? 50 : ia) - (ib < 0 ? 50 : ib) || b[1] - a[1];
@@ -1496,17 +1563,16 @@ export default function Library({ embed = false }) {
     return () => { cancelAnimationFrame(raf); clearTimeout(unmount); };
   }, [askOpen]);
 
-  const latest = useMemo(() => items.find((i) => !i.special) || items[0], [items]);
+  const latest = useMemo(() => items[0], [items]);
   const featured = focus || latest;
   useEffect(() => { prefetch(featured); }, [featured]);
   const shelves = useMemo(() => {
+    // every shelf is laid out by year; anything without a date goes last
     const years = {};
-    shown.filter((i) => !i.special).forEach((i) => { const y = yearOf(i) || "Other"; (years[y] = years[y] || []).push(i); });
-    const rows = Object.entries(years).sort((a, b) => b[0].localeCompare(a[0])).map(([y, list]) => ({ key: y, title: y, list }));
-    const sp = shown.filter((i) => i.special);
-    if (sp.length) rows.push({ key: "special", title: "Special editions", list: sp });
-    return rows;
-  }, [shown]);
+    shown.forEach((i) => { const y = undated(i) ? "Other" : yearOf(i) || "Other"; (years[y] = years[y] || []).push(i); });
+    return Object.entries(years).sort((a, b) => (a[0] === "Other") - (b[0] === "Other") || b[0].localeCompare(a[0]))
+      .map(([y, list]) => ({ key: y, title: y === "Other" && Object.keys(years).length === 1 ? (shelfList.find((x) => x.id === curShelf)?.name || "All") : y, list }));
+  }, [shown, shelfList, curShelf]);
 
   const pickTopic = (t) => {
     setTopic(t);
@@ -1524,6 +1590,7 @@ export default function Library({ embed = false }) {
   const onFocus = (it) => { clearTimeout(focusTimer.current); focusTimer.current = setTimeout(() => setFocus(it), 90); };
   const openIssue = (it, page = 0) => {
     setSharedH(null);
+    if (it.shelf && it.shelf !== curShelf) setShelf(it.shelf);
     setOpen(it); setStartPage(page); setSearchSheet(false); setReadPage(page); setLeaving(false);
     if (spot) { setSpot(null); }
     if (isWide()) setAskOpen(true);
@@ -1602,6 +1669,7 @@ export default function Library({ embed = false }) {
           {brand.website ? <a href={brand.website} target="_blank" rel="noopener noreferrer" className="shrink-0">{logo}</a> : <span className="shrink-0">{logo}</span>}
           <span className="w-px h-6 bg-white/20 shrink-0" aria-hidden="true" />
           <button onClick={back} className="text-[16px] sm:text-[17px] font-normal tracking-[-0.01em] truncate hover:text-white text-white/90 min-w-0" data-testid="library-title">{lib.title}</button>
+          {shelfList.length > 1 && curShelf !== shelfList[0].id && <span className="hidden sm:inline text-[15px] text-white/50 truncate shrink-0 -ml-1" data-testid="shelf-name">/ {shelfList.find((x) => x.id === curShelf)?.name}</span>}
 
           {!open && items.length > 0 && !mobile && (
             <button onClick={toggleAsk} aria-expanded={!!spot} className={`lib-askpill mx-auto h-10 w-[min(440px,34vw)] rounded-full flex items-center gap-3 pl-4 pr-2 text-left transition-all duration-300 ${spot ? "opacity-0 scale-95 pointer-events-none" : "lib-glass hover:bg-white/[0.14]"}`} data-testid="ask-pill">
@@ -1664,14 +1732,16 @@ export default function Library({ embed = false }) {
                   )}
                   <p className="text-[15px] text-white/60">{featured?.special ? featured.kind : featured?.flipbook_id === latest?.flipbook_id ? "Latest issue" : "From the archive"}</p>
                   <h1 className="mt-2 leading-[0.92] tracking-[-0.035em]">
-                    {undated(featured) ? <span className="block text-[clamp(36px,4.6vw,64px)] font-light leading-[1.05] tracking-[-0.02em]">{featured.label}</span> : <>
+                    {undated(featured) || curShelf === "articles" || curShelf === "presentations" ? <>
+                      <span className="block text-[clamp(36px,4.6vw,64px)] font-light leading-[1.05] tracking-[-0.02em]">{featured.label}</span>
+                      {!undated(featured) && <span className="block mt-3 text-[clamp(18px,1.8vw,24px)] font-light tracking-normal text-[color:var(--mist)]">{new Date(featured.date + "-01T00:00:00").toLocaleDateString("en-GB", { month: "long", year: "numeric" })}</span>}</> : <>
                     <span className="block text-[clamp(56px,8.5vw,120px)] font-light">{monthOf(featured)}</span>
                     <span className="block text-[clamp(30px,4vw,56px)] font-light text-[color:var(--mist)]">{yearOf(featured)}</span></>}
                   </h1>
                   {featured?.toc?.length > 0 && (
                     <div className="mt-7 space-y-3">
                       <div className="flex flex-wrap gap-2">
-                        {topicsOf(featured).map((t) => (
+                        {topicsOf(featured).filter((t) => t !== "Special editions").map((t) => (
                           <button key={t} onClick={() => pickTopic(t)} title={`Show every issue covering ${t}`} className={`lib-cond h-7 px-3 rounded-full border text-[13px] inline-flex items-center transition-colors ${topic === t ? "bg-white text-[color:var(--ink)] border-white" : "bg-white/[0.08] border-white/10 text-white/80 hover:bg-white/[0.18] hover:text-white"}`}>{t}</button>
                         ))}
                       </div>
@@ -1682,7 +1752,7 @@ export default function Library({ embed = false }) {
                   )}
                   {upcoming(featured).length > 0 && <div className="mt-6 max-w-lg"><DatesToAct lib={lib} item={featured} slug={slug} max={3} /></div>}
                   <div className="mt-8 flex items-center gap-4">
-                    <button onClick={() => fly(featured, hero.target.current)} className="h-12 px-7 rounded-full bg-white text-[color:var(--ink)] text-[15px] font-medium hover:bg-[color:var(--paper)] active:scale-[0.98] transition" data-testid="library-read">Read {featured?.special ? "edition" : monthOf(featured)}</button>
+                    <button onClick={() => fly(featured, hero.target.current)} className="h-12 px-7 rounded-full bg-white text-[color:var(--ink)] text-[15px] font-medium hover:bg-[color:var(--paper)] active:scale-[0.98] transition" data-testid="library-read">{curShelf === "articles" ? "Read article" : curShelf === "presentations" ? "Open" : featured?.special ? "Read edition" : `Read ${monthOf(featured)}`}</button>
                     <button onClick={() => setShareOf({ item: featured, page: 0 })} className="h-12 w-12 rounded-full lib-glass grid place-items-center hover:bg-white/15 transition-colors" aria-label={`Share ${issueName(featured)}`} title="Share" data-testid="hero-share"><Share2 className="w-[18px] h-[18px]" /></button>
                     <span className="lib-cond text-[13px] text-white/50">{featured?.page_count} pages</span>
                   </div>
@@ -1708,7 +1778,7 @@ export default function Library({ embed = false }) {
                         onFocus={() => setActiveRow(row.key)} data-testid={`row-${row.key}`} data-expanded={expanded ? "1" : "0"} className="lib-swap">
                         <button type="button" onClick={() => setActiveRow(activeRow === row.key ? null : row.key)} className="px-4 sm:px-8 lg:px-12 flex items-baseline gap-3 mb-2 text-left">
                           <h2 className={`${row.key === "special" ? "text-[22px] font-light" : "text-[34px] font-thin tracking-[-0.03em] leading-none"} transition-colors duration-300 ${expanded ? "text-white" : "text-white/60"}`}>{row.title}</h2>
-                          <span className="lib-cond text-[13px] text-white/45">{row.list.length} {row.list.length === 1 ? "issue" : "issues"}{expanded ? "" : ", hover to spread"}</span>
+                          <span className="lib-cond text-[13px] text-white/45">{row.list.length} {SHELF_WORD[curShelf] || "issue"}{row.list.length === 1 ? "" : "s"}{expanded ? "" : ", hover to spread"}</span>
                         </button>
                         <div className="lib-shelf flex overflow-x-auto px-4 sm:px-8 lg:px-12 scroll-px-4 sm:scroll-px-8 lg:scroll-px-12 pb-4 pt-3">
                           {row.list.map((it, i) => (
@@ -1752,7 +1822,7 @@ export default function Library({ embed = false }) {
             </main>
           ) : (
             <main className="min-h-0 grid grid-cols-1 md:grid-cols-[84px_minmax(0,1fr)]" data-testid="library-reading">
-              <div className="hidden md:block min-h-0 border-r border-white/[0.06]"><DockRail items={items} current={open.flipbook_id} onOpen={openIssue} /></div>
+              <div className="hidden md:block min-h-0 border-r border-white/[0.06]"><DockRail items={items} current={open.flipbook_id} onOpen={openIssue} switcher={switcher("down", "")} /></div>
               <Reader slug={slug} item={open} items={items} startPage={startPage} embed={embed} onOpen={openIssue} onBack={back} onPage={setReadPage}
                 onShown={land} onSubscribe={() => setSubOpen("subscribe")} subscribed={subscribed} onShare={(it, p, head) => setShareOf({ item: it, page: p, head: head || null })}
                 lib={lib} channel={channel} sharedHead={sharedH != null && open ? flatHeads(open)[sharedH] || null : null}
@@ -1769,6 +1839,7 @@ export default function Library({ embed = false }) {
         )}
       </div>
 
+      {!open && items.length > 0 && switcher("up", `absolute z-40 ${mobile ? "left-4 bottom-5" : "left-6 bottom-6"}`)}
       <BrandBars className="hidden md:block absolute right-6 bottom-3 z-20" />
       {lib.show_badge && <PoweredBy slug={slug} className="hidden md:flex absolute right-[188px] bottom-[7px] z-20" />}
 

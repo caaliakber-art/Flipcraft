@@ -619,7 +619,30 @@ MONTH_ABBR = {m[:3]: i for m, i in MONTHS.items()}
 MONTH_NAMES = {i: m.capitalize() for m, i in MONTHS.items()}
 
 
+SHELVES = [("monthly", "Monthly Communique"), ("special", "Special Communiques"), ("articles", "Articles"), ("presentations", "Presentations & Budget")]
+
+
+def shelf_of(it: dict) -> str:
+    return it.get("shelf") or ("special" if it.get("special") else "monthly")
+
+
+def guess_shelf(name: str) -> str:
+    if re.search(r"article|journal|column|op-?ed", name, re.I):
+        return "articles"
+    if re.search(r"budget|presentation|\bppt|deck|webinar|seminar|slides", name, re.I):
+        return "presentations"
+    return ""
+
+
 def guess_issue(name: str) -> dict:
+    info = _guess_issue(name)
+    shelf = guess_shelf(name)
+    if shelf:
+        info.update(shelf=shelf, special=True, kind=info.get("kind") if info.get("kind") not in ("", "Special edition") else ("Article" if shelf == "articles" else "Budget" if re.search("budget", name, re.I) else "Presentation"))
+    return info
+
+
+def _guess_issue(name: str) -> dict:
     """'Monthly Communique_October 2026' -> label October 2026, date 2026-10.
     Anything that isn't a plain monthly issue is marked as a special edition."""
     base = re.sub(r"\.pdf$", "", name, flags=re.I)
@@ -654,6 +677,7 @@ class LibraryItem(BaseModel):
     date: str = Field("", pattern=r"^(\d{4}-\d{2})?$")
     special: bool = False
     kind: str = Field("", max_length=60)
+    shelf: Literal["", "monthly", "special", "articles", "presentations"] = ""
     deadlines: List[Deadline] = Field(default_factory=list, max_length=30)
 
 
@@ -674,6 +698,7 @@ class LibraryUpdate(BaseModel):
 class AddItem(BaseModel):
     flipbook_id: str = Field(max_length=40)
     filename: str = Field("", max_length=300)
+    shelf: Literal["", "monthly", "special", "articles", "presentations"] = ""
 
 
 async def workspace_plan(ohash: str) -> dict:
@@ -704,7 +729,7 @@ async def library_view(lib: dict, public: bool) -> dict:
         items.append({**it, "status": b["status"], "page_count": b.get("page_count", 0), "pages_done": b.get("pages_done", 0), "error": b.get("error") if b["status"] == "failed" else None,
                       "cover": (b.get("pages") or [""])[0], "thumb": (b.get("thumbs") or [""])[0],
                       "aspect": (b.get("page_width") or 595) / max(b.get("page_height") or 842, 1),
-                      "toc": b.get("toc", []) if public else [], "title": b["title"], "cover_mask": b.get("cover_mask")})
+                      "toc": b.get("toc", []) if public else [], "title": b["title"], "cover_mask": b.get("cover_mask"), "shelf": shelf_of(it)})
     plan = await workspace_plan(lib["owner_hash"])
     brand = await get_brand(lib["owner_hash"])
     return {"id": lib["id"], "slug": lib["slug"], "title": lib["title"], "subtitle": lib.get("subtitle", ""),
@@ -712,7 +737,8 @@ async def library_view(lib: dict, public: bool) -> dict:
             "show_badge": not plan["remove_badge"], "updated_at": lib.get("updated_at", lib["created_at"]),
             "pitch_title": lib.get("pitch_title", ""), "pitch_text": lib.get("pitch_text", ""),
             "offer_credentials": bool(lib.get("offer_credentials")),
-            "ask_ai": bool(plan.get("ai_search") and ask_mod.key())}
+            "ask_ai": bool(plan.get("ai_search") and ask_mod.key()),
+            "shelves": [{"id": k, "name": n, "count": sum(1 for i in items if i["shelf"] == k)} for k, n in SHELVES]}
 
 
 @api.get("/libraries")
@@ -772,7 +798,13 @@ async def add_library_item(lid: str, body: AddItem, ohash: str = Depends(require
     lib = await owned_library(lid, ohash)
     await owned_flipbook(body.flipbook_id, ohash)
     items = [i for i in lib.get("items", []) if i["flipbook_id"] != body.flipbook_id]
-    items.append({"flipbook_id": body.flipbook_id, **guess_issue(body.filename or body.flipbook_id)})
+    info = guess_issue(body.filename or body.flipbook_id)
+    if body.shelf:
+        info["shelf"] = body.shelf
+        info["special"] = body.shelf != "monthly"
+        if body.shelf != "monthly" and not info.get("kind"):
+            info["kind"] = {"special": "Special edition", "articles": "Article", "presentations": "Presentation"}[body.shelf]
+    items.append({"flipbook_id": body.flipbook_id, **info})
     await db.libraries.update_one({"id": lid}, {"$set": {"items": items, "updated_at": now_iso()}})
     lib["items"] = items
     search_cache.pop(lib["slug"], None)

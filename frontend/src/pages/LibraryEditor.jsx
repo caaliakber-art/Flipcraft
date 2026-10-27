@@ -16,6 +16,9 @@ const Field = ({ label, children }) => (
   </label>
 );
 
+const SHELF_OPTS = [["monthly", "Monthly Communique"], ["special", "Special Communiques"], ["articles", "Articles"], ["presentations", "Presentations & Budget"]];
+const shelfOf = (i) => i.shelf || (i.special ? "special" : "monthly");
+
 export default function LibraryEditor() {
   const { id } = useParams();
   const nav = useNavigate();
@@ -26,6 +29,8 @@ export default function LibraryEditor() {
   const [queue, setQueue] = useState([]);
   const [datesFor, setDatesFor] = useState(null);
   const [emailFor, setEmailFor] = useState(null);
+  const [upShelf, setUpShelf] = useState("");
+  const [view, setView] = useState("all");
   const fileRef = useRef(null);
 
   const apply = (data, keepEdits = false) => {
@@ -33,7 +38,7 @@ export default function LibraryEditor() {
     if (!keepEdits) { setForm({ title: data.title, subtitle: data.subtitle, pitch_title: data.pitch_title || "", pitch_text: data.pitch_text || "", offer_credentials: !!data.offer_credentials }); setItems(data.items); setDirty(false); }
     else setItems((cur) => data.items.map((i) => cur.find((c) => c.flipbook_id === i.flipbook_id) ? { ...i, ...pick(cur.find((c) => c.flipbook_id === i.flipbook_id)) } : i));
   };
-  const pick = (i) => ({ label: i.label, date: i.date, special: i.special, kind: i.kind, deadlines: i.deadlines || [] });
+  const pick = (i) => ({ label: i.label, date: i.date, special: i.special, kind: i.kind, shelf: i.shelf || "", deadlines: i.deadlines || [] });
   const load = useCallback((keep = false) => api.get(`/libraries/${id}`).then((r) => apply(r.data, keep)).catch((e) => { toast.error(errMsg(e)); nav("/"); }), [id]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, [load]);
 
@@ -57,7 +62,7 @@ export default function LibraryEditor() {
             fd.append("file", f);
             book = (await api.post("/flipbooks", fd)).data;
           }
-          const { data } = await api.post(`/libraries/${id}/items`, { flipbook_id: book.id, filename: f.name });
+          const { data } = await api.post(`/libraries/${id}/items`, { flipbook_id: book.id, filename: f.name, shelf: upShelf });
           apply(data, true);
           setQueue((q) => q.map((x) => (x.name === f.name ? { ...x, state: "done" } : x)));
           break;
@@ -127,7 +132,13 @@ export default function LibraryEditor() {
             <p className="mt-3 font-medium">Drop issues here, or choose several PDFs at once</p>
             <p className="text-sm text-slate-400 mt-1">Month and year are read from the file name, e.g. “Monthly Communique_October 2026.pdf”.</p>
             <input ref={fileRef} type="file" accept="application/pdf" multiple hidden onChange={(e) => { addFiles(e.target.files); e.target.value = ""; }} data-testid="library-file-input" />
-            <Button variant="secondary" className="mt-4" onClick={() => fileRef.current.click()}>Choose PDFs</Button>
+            <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
+              <select value={upShelf} onChange={(e) => setUpShelf(e.target.value)} className="h-10 rounded-md bg-black/30 border border-white/10 px-2 text-sm" aria-label="Add to shelf" data-testid="upload-shelf">
+                <option value="">Shelf: decide from file name</option>
+                {SHELF_OPTS.map(([k, n]) => <option key={k} value={k}>Add to {n}</option>)}
+              </select>
+              <Button variant="secondary" onClick={() => fileRef.current.click()}>Choose PDFs</Button>
+            </div>
             {queue.length > 0 && (
               <ul className="mt-5 text-left text-sm space-y-1 max-h-40 overflow-y-auto">
                 {queue.map((q) => (
@@ -151,14 +162,22 @@ export default function LibraryEditor() {
               )}
             </div>
             {items.length === 0 && <p className="text-sm text-slate-400">No issues yet. Add PDFs above.</p>}
+            {items.length > 0 && (
+              <div className="flex flex-wrap gap-2 text-sm">
+                {[["all", "All"], ...SHELF_OPTS].map(([k, n]) => {
+                  const c = k === "all" ? items.length : items.filter((i) => shelfOf(i) === k).length;
+                  return <button key={k} onClick={() => setView(k)} className={`h-8 px-3 rounded-full ${view === k ? "bg-white text-slate-900" : "border border-white/10 text-slate-300 hover:bg-white/5"}`}>{n} <span className="opacity-60">{c}</span></button>;
+                })}
+              </div>
+            )}
             <div className="divide-y divide-white/5 rounded-xl border border-white/10">
-              {items.map((it) => (
+              {items.filter((i) => view === "all" || shelfOf(i) === view).map((it) => (
                 <div key={it.flipbook_id} className="flex items-center gap-4 p-3" data-testid={`library-item-${it.flipbook_id}`}>
                   <div className="w-12 shrink-0">{it.thumb ? <img src={fileUrl(it.thumb)} alt="" className="w-12 rounded-sm" /> : <div className="w-12 aspect-[3/4] rounded-sm bg-white/5 grid place-items-center"><Loader2 className="w-4 h-4 animate-spin text-slate-500" /></div>}</div>
                   <div className="flex-1 grid sm:grid-cols-[1fr_140px] gap-2 min-w-0">
                     <Input value={it.label} onChange={(e) => setItem(it.flipbook_id, { label: e.target.value })} aria-label="Label" />
                     <Input type="month" value={it.date} onChange={(e) => setItem(it.flipbook_id, { date: e.target.value })} aria-label="Issue month" />
-                    {it.special && <Input value={it.kind} onChange={(e) => setItem(it.flipbook_id, { kind: e.target.value })} placeholder="Edition name, e.g. AIF edition" className="sm:col-span-2" />}
+                    {it.special && <Input value={it.kind} onChange={(e) => setItem(it.flipbook_id, { kind: e.target.value })} placeholder={shelfOf(it) === "articles" ? "Title, e.g. Taxing GCCs" : shelfOf(it) === "presentations" ? "Title, e.g. Union Budget 2026" : "Edition name, e.g. AIF edition"} className="sm:col-span-2" />}
                     {it.status === "processing" && <p className="text-xs text-slate-400 sm:col-span-2">Preparing pages {it.pages_done}/{it.page_count || "…"}</p>}
                     {it.status === "failed" && <p className="text-xs text-red-400 sm:col-span-2" data-testid={`failed-${it.flipbook_id}`}>{it.error || "This upload didn't finish. Remove it and upload the PDF again."}</p>}
                     {it.status === "ready" && (
@@ -168,7 +187,10 @@ export default function LibraryEditor() {
                       </div>
                     )}
                   </div>
-                  <label className="flex items-center gap-2 text-xs text-slate-400 shrink-0"><Switch checked={!!it.special} onCheckedChange={(v) => setItem(it.flipbook_id, { special: v, kind: v ? it.kind || "Special edition" : "" })} />Special</label>
+                  <select value={shelfOf(it)} onChange={(e) => { const v = e.target.value; setItem(it.flipbook_id, { shelf: v, special: v !== "monthly", kind: v === "monthly" ? "" : it.kind || { special: "Special edition", articles: "Article", presentations: "Presentation" }[v] }); }}
+                    className="h-9 rounded-md bg-black/30 border border-white/10 px-2 text-xs shrink-0 max-w-[150px]" aria-label="Shelf" data-testid={`shelf-${it.flipbook_id}`}>
+                    {SHELF_OPTS.map(([k, n]) => <option key={k} value={k}>{n}</option>)}
+                  </select>
                   <Button variant="ghost" size="icon" onClick={() => remove(it.flipbook_id)} aria-label="Remove from library"><Trash2 className="w-4 h-4" /></Button>
                 </div>
               ))}
