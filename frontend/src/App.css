@@ -268,6 +268,8 @@
 @keyframes lib-fade-out { from { opacity: 1; } to { opacity: 0; } }
 @keyframes lib-drop { from { opacity: 0; transform: translateY(-18px) scale(0.97); } to { opacity: 1; transform: none; } }
 @keyframes lib-lift { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(-14px) scale(0.98); } }
+/* Search surfaces sit over busy pages: solid, so nothing behind shows through the text. */
+.lib-solid { background: linear-gradient(180deg, #13263d, #0e1d30); border: 1px solid rgba(157, 184, 212, 0.18); box-shadow: 0 30px 70px -24px rgba(0, 0, 0, 0.75), inset 0 1px 0 rgba(255, 255, 255, 0.06); }
 .lib-spot-bar:focus-within { border-color: rgba(157, 184, 212, 0.6); box-shadow: 0 0 0 4px rgba(157, 184, 212, 0.12), 0 30px 60px -20px rgba(0, 0, 0, 0.7); }
 
 /* topic filters stay in reach while the shelves scroll */

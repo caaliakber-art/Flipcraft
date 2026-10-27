@@ -532,10 +532,10 @@ function Spotlight({ slug, lib, topics, closing, onOpen, onTopic, onClose }) {
   const assistant = `Ask ${shortName(lib.brand?.name) || "the archive"}`;
   return (
     <div className={`absolute inset-0 top-16 z-40 ${closing ? "lib-spot-out" : "lib-spot-in"}`} role="dialog" aria-label={assistant} data-testid="spotlight">
-      <button className="absolute inset-0 w-full h-full bg-[#0a1626]/60 backdrop-blur-[6px] cursor-default lib-fade" onClick={onClose} aria-label="Close search" tabIndex={-1} />
+      <button className="absolute inset-0 w-full h-full bg-[#081320]/80 backdrop-blur-md cursor-default lib-fade" onClick={onClose} aria-label="Close search" tabIndex={-1} />
       <div className="lib-spot relative mx-auto mt-5 w-[min(880px,calc(100vw-24px))]"
         onMouseLeave={() => { if (!q.trim() && !thread.length) leave.current = setTimeout(onClose, 650); }} onMouseEnter={() => clearTimeout(leave.current)}>
-        <label className="lib-glass bg-[#10233a]/85 lib-spot-bar flex items-center gap-3 h-16 rounded-full pl-5 pr-3 shadow-2xl">
+        <label className="lib-solid lib-spot-bar flex items-center gap-3 h-16 rounded-full pl-5 pr-3 shadow-2xl">
           <Barcode count={5} active={2} height={18} />
           <span className="hidden sm:inline text-[15px] text-[color:var(--mist)] shrink-0">{assistant}</span>
           <input ref={inputRef} value={q} onChange={(e) => setQ(e.target.value)} placeholder={askOn ? (thread.length ? "Ask a follow-up" : "Ask a question, or search: GSTAT, TDS on rent...") : "Search every issue: GSTAT, TDS on rent, FEMA reporting..."}
@@ -547,7 +547,7 @@ function Spotlight({ slug, lib, topics, closing, onOpen, onTopic, onClose }) {
           <kbd className="hidden sm:inline lib-cond text-[11px] text-white/45 border border-white/15 rounded px-1.5 py-0.5 shrink-0">Esc</kbd>
         </label>
 
-        <div className="lib-glass bg-[#0f1f33]/85 mt-3 rounded-3xl overflow-hidden lib-spot-panel">
+        <div className="lib-solid mt-3 rounded-3xl overflow-hidden lib-spot-panel">
           <div className="max-h-[min(62vh,620px)] overflow-y-auto lib-scroll p-4 sm:p-5">
             {askOn && q.trim().length >= 2 && (
               <button onClick={send} disabled={asking} className="w-full mb-3 flex items-center gap-3 rounded-2xl bg-white/[0.07] hover:bg-white/[0.12] px-4 h-12 text-[15px] text-white/85 transition-colors disabled:opacity-50 text-left" data-testid="spot-ask-send">
