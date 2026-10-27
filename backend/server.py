@@ -69,9 +69,17 @@ def put_object(path: str, data: bytes, content_type: str) -> dict:
 
 
 def download_to(path: str, dest: Path):
+    """One GET per file. (boto3's download_file adds a HEAD first and splits big files
+    into several ranged GETs, each counted against the storage provider's daily cap.)"""
     tmp = dest.with_suffix(f".{uuid.uuid4().hex}.part")
-    store.download_file(S3_BUCKET, path, str(tmp))
-    tmp.rename(dest)
+    try:
+        body = store.get_object(Bucket=S3_BUCKET, Key=path)["Body"]
+        with open(tmp, "wb") as out:
+            for chunk in iter(lambda: body.read(1024 * 1024), b""):
+                out.write(chunk)
+        tmp.rename(dest)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def now_iso():
@@ -1086,13 +1094,12 @@ async def og_bytes(slug: str, issue: str = "", h: int = -1) -> Optional[bytes]:
     stored = f"og/{hashlib.sha1(key.encode()).hexdigest()}.jpg"
     if key not in og_cache:
         local = CACHE_DIR / hashlib.sha1(stored.encode()).hexdigest()
-        if local.exists() or await asyncio.to_thread(lambda: _exists(stored)):
-            try:
-                if not local.exists():
-                    await asyncio.to_thread(download_to, stored, local)
-                og_cache[key] = local.read_bytes()
-            except Exception:
-                pass
+        try:  # a stored card is one GET; a missing one fails that same GET, no separate check
+            if not local.exists():
+                await asyncio.to_thread(download_to, stored, local)
+            og_cache[key] = local.read_bytes()
+        except Exception:
+            pass
     if key not in og_cache:
         kicker, headline, sub = view["title"], view["title"], view.get("pitch_text") or ""
         if it:
@@ -1115,14 +1122,6 @@ async def og_bytes(slug: str, issue: str = "", h: int = -1) -> Optional[bytes]:
         if len(og_cache) > 300:
             og_cache.pop(next(iter(og_cache)))
     return og_cache[key]
-
-
-def _exists(path: str) -> bool:
-    try:
-        store.head_object(Bucket=S3_BUCKET, Key=path)
-        return True
-    except Exception:
-        return False
 
 
 @api.get("/og/{slug}.{ext}")
@@ -1823,6 +1822,8 @@ async def backfill_cover_masks():
                 await db.flipbooks.update_one({"id": fb["id"]}, {"$set": {"cover_mask": mask}})
             except Exception as e:
                 logger.warning("Cover mask for %s failed: %s", fb["id"], e)
+                # don't retry on every restart; each retry re-downloads the PDF
+                await db.flipbooks.update_one({"id": fb["id"]}, {"$set": {"cover_mask": None}})
             finally:
                 local.unlink(missing_ok=True)
                 fitz.TOOLS.store_shrink(100)
