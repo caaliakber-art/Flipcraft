@@ -46,15 +46,30 @@ export default function LibraryEditor() {
     setQueue((q) => [...q, ...pdfs.map((f) => ({ name: f.name, state: "waiting" }))]);
     for (const f of pdfs) {
       setQueue((q) => q.map((x) => (x.name === f.name ? { ...x, state: "uploading" } : x)));
-      try {
-        const fd = new FormData();
-        fd.append("file", f);
-        const { data: book } = await api.post("/flipbooks", fd);
-        const { data } = await api.post(`/libraries/${id}/items`, { flipbook_id: book.id, filename: f.name });
-        apply(data, true);
-        setQueue((q) => q.map((x) => (x.name === f.name ? { ...x, state: "done" } : x)));
-      } catch (e) {
-        setQueue((q) => q.map((x) => (x.name === f.name ? { ...x, state: "failed", error: errMsg(e) } : x)));
+      // If the server is briefly unreachable (waking up or restarting), wait and try again
+      // instead of giving up, so a long batch of uploads doesn't silently lose files.
+      const transient = (e) => !e?.response || [502, 503, 504, 520, 521, 522, 524].includes(e.response.status);
+      let book = null;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          if (!book) {
+            const fd = new FormData();
+            fd.append("file", f);
+            book = (await api.post("/flipbooks", fd)).data;
+          }
+          const { data } = await api.post(`/libraries/${id}/items`, { flipbook_id: book.id, filename: f.name });
+          apply(data, true);
+          setQueue((q) => q.map((x) => (x.name === f.name ? { ...x, state: "done" } : x)));
+          break;
+        } catch (e) {
+          if (transient(e) && attempt < 4) {
+            setQueue((q) => q.map((x) => (x.name === f.name ? { ...x, state: "retrying" } : x)));
+            await new Promise((r) => setTimeout(r, [5000, 15000, 30000, 45000][attempt]));
+            continue;
+          }
+          setQueue((q) => q.map((x) => (x.name === f.name ? { ...x, state: "failed", error: errMsg(e) } : x)));
+          break;
+        }
       }
     }
   };
@@ -118,7 +133,7 @@ export default function LibraryEditor() {
                 {queue.map((q) => (
                   <li key={q.name} className="flex justify-between gap-3">
                     <span className="truncate text-slate-300">{q.name}</span>
-                    <span className={q.state === "failed" ? "text-red-400" : q.state === "done" ? "text-emerald-400" : "text-slate-400"}>{q.state === "failed" ? q.error : q.state === "done" ? "Added" : q.state === "uploading" ? "Uploading" : "Waiting"}</span>
+                    <span className={q.state === "failed" ? "text-red-400" : q.state === "done" ? "text-emerald-400" : q.state === "retrying" ? "text-amber-300" : "text-slate-400"}>{q.state === "failed" ? q.error : q.state === "done" ? "Added" : q.state === "uploading" ? "Uploading" : q.state === "retrying" ? "Server busy, retrying..." : "Waiting"}</span>
                   </li>
                 ))}
               </ul>

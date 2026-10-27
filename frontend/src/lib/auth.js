@@ -9,7 +9,17 @@ export function AuthProvider({ children }) {
 
   useEffect(() => {
     if (!getToken()) return;
-    api.get("/auth/me").then((r) => setAccount(r.data)).catch(() => { setToken(null); setAccount(null); });
+    // Only a real "not signed in" answer logs you out. If the server is briefly
+    // unreachable (waking up, restarting), keep the login and try again.
+    let tries = 0, timer = 0, live = true;
+    const check = () => api.get("/auth/me").then((r) => live && setAccount(r.data)).catch((e) => {
+      if (!live) return;
+      if (e?.response?.status === 401) { setToken(null); setAccount(null); return; }
+      tries += 1;
+      timer = setTimeout(check, Math.min(15000, 2000 * tries));
+    });
+    check();
+    return () => { live = false; clearTimeout(timer); };
   }, []);
 
   const signIn = useCallback(async (path, body) => {

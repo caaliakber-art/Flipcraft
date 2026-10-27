@@ -9,6 +9,8 @@ from typing import Dict, List, Literal, Optional
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 import asyncio
+import gc
+import shutil
 import hashlib
 import json
 import logging
@@ -303,28 +305,27 @@ async def convert_job(fid: str, ohash: str):
         try:
             if not local.exists():
                 await asyncio.to_thread(download_to, fb["pdf_src"], local)
-            data = await asyncio.to_thread(local.read_bytes)
         except Exception as e:
             logger.exception("Could not read stored PDF")
             await db.flipbooks.update_one({"id": fid}, {"$set": {"status": "failed", "error": f"Stored PDF could not be read: {e}"[:300]}})
             return
         try:
-            await _convert(fid, data, ohash, pdf_path=fb["pdf_src"])
+            await _convert(fid, str(local), ohash, pdf_path=fb["pdf_src"])
         finally:
             local.unlink(missing_ok=True)
+            fitz.TOOLS.store_shrink(100)
+            gc.collect()
 
 
 INTERRUPTED = "The upload was interrupted before it finished. Please remove it and upload the PDF again."
 
 
-async def _convert(fid: str, data: bytes, ohash: str, pdf_path: Optional[str] = None):
+async def _convert(fid: str, path: str, ohash: str, pdf_path: Optional[str] = None):
     try:
-        doc = await asyncio.to_thread(fitz.open, stream=data, filetype="pdf")
+        doc = await asyncio.to_thread(fitz.open, path)
         count = doc.page_count
         rect = doc[0].rect
-        doc.close()
         await db.flipbooks.update_one({"id": fid}, {"$set": {"page_count": count, "page_width": rect.width, "page_height": rect.height}})
-        doc = fitz.open(stream=data, filetype="pdf")
         pages, thumbs = [], []
         for i in range(count):
             page = doc[i]
@@ -343,7 +344,7 @@ async def _convert(fid: str, data: bytes, ohash: str, pdf_path: Optional[str] = 
             toc = []
         doc.close()
         await db.flipbooks.update_one({"id": fid}, {"$set": {"toc": toc}})
-        pdf_path = pdf_path or await store_file(data, "application/pdf", "pdf", f"pages/{fid}", ohash, private=True)
+        pdf_path = pdf_path or await store_file(Path(path).read_bytes(), "application/pdf", "pdf", f"pages/{fid}", ohash, private=True)
         await db.flipbooks.update_one({"id": fid}, {"$set": {"pages": pages, "thumbs": thumbs, "pdf_path": pdf_path, "status": "ready", "updated_at": now_iso()}})
         if (await db.flipbooks.find_one({"id": fid}, {"is_deleted": 1})).get("is_deleted"):
             await db.files.update_many({"storage_path": {"$regex": f"^{APP_NAME}/pages/{fid}/"}}, {"$set": {"is_deleted": True}})
@@ -420,23 +421,39 @@ async def save_brand(body: Brand, ohash: str = Depends(require_owner)):
 
 @api.post("/flipbooks")
 async def create_flipbook(background: BackgroundTasks, file: UploadFile = File(...), title: str = Form(""), ohash: str = Depends(require_owner)):
-    data = await file.read()
-    if len(data) > MAX_PDF:
+    # Large PDFs stay on disk the whole way (upload, check, storage, conversion), so
+    # several big uploads in a row can't run the small server out of memory.
+    src = file.file
+    head = src.read(5)
+    src.seek(0, 2)
+    size = src.tell()
+    src.seek(0)
+    if size > MAX_PDF:
         raise HTTPException(status_code=413, detail="PDF is larger than 100 MB")
-    if not data.startswith(b"%PDF"):
+    if not head.startswith(b"%PDF"):
         raise HTTPException(status_code=400, detail="Please upload a valid PDF file")
-    try:
-        probe = fitz.open(stream=data, filetype="pdf")
-        if probe.page_count == 0:
-            raise ValueError("empty")
-        probe.close()
-    except Exception:
-        raise HTTPException(status_code=400, detail="This PDF could not be read")
     fid = uuid.uuid4().hex[:12]
+    local = CACHE_DIR / f"src-{fid}.pdf"
+    def save():
+        with open(local, "wb") as out:
+            shutil.copyfileobj(src, out, 1024 * 1024)
+    await asyncio.to_thread(save)
+    try:
+        def probe_pages():
+            with fitz.open(str(local)) as d:
+                return d.page_count
+        if await asyncio.to_thread(probe_pages) == 0:
+            raise ValueError("empty")
+    except Exception:
+        local.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="This PDF could not be read")
     name = (title or (file.filename or "Untitled").rsplit(".", 1)[0]).strip()[:150] or "Untitled"
     # keep the PDF safe first; the page images are made from this copy
-    pdf_src = await store_file(data, "application/pdf", "pdf", f"pages/{fid}", ohash, name=file.filename or "", private=True)
-    del data
+    pdf_src = f"{APP_NAME}/pages/{fid}/{uuid.uuid4()}.pdf"
+    await asyncio.to_thread(store.upload_file, str(local), S3_BUCKET, pdf_src, ExtraArgs={"ContentType": "application/pdf"})
+    await db.files.insert_one({"id": str(uuid.uuid4()), "storage_path": pdf_src, "original_filename": file.filename or "",
+                               "content_type": "application/pdf", "size": size, "owner_hash": ohash, "private": True,
+                               "is_deleted": False, "created_at": now_iso()})
     fb = {"id": fid, "title": name, "owner_hash": ohash, "status": "processing", "page_count": 0, "pages_done": 0,
           "pages": [], "thumbs": [], "overlays": [], "sound": True, "is_deleted": False, "created_at": now_iso(), "pdf_src": pdf_src}
     await db.flipbooks.insert_one(dict(fb))
