@@ -444,7 +444,7 @@ function SearchPanel({ slug, lib, current, readPage, onOpen, onClose, autoFocus 
         <label className="relative block">
           <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-white/50" />
           <input ref={inputRef} value={q} onChange={(e) => setQ(e.target.value)} placeholder={askOn ? (thread.length ? "Ask a follow-up" : "Ask or search: GSTAT, TDS...") : "GSTAT, TDS, FEMA...   Press / to search"}
-            onKeyDown={(e) => { if (e.key === "Escape") { if (q) setQ(""); else onClose?.(); } else if (e.key === "Enter") send(); }}
+            onKeyDown={(e) => { if (e.key === "Escape") { if (q) setQ(""); else onClose?.(); } else if (e.key === "Enter" && looksLikeQuestion(q)) send(); }}
             enterKeyHint={askOn ? "send" : "search"}
             className="w-full h-11 rounded-xl bg-black/25 border border-white/10 pl-10 pr-9 text-[15px] placeholder:text-white/40 focus:outline-none focus:border-[color:var(--mist)] focus:bg-black/35 transition-colors"
             data-testid="library-search-input" />
@@ -537,7 +537,7 @@ function Spotlight({ slug, lib, topics, closing, onOpen, onTopic, onClose }) {
           <Barcode count={5} active={2} height={18} />
           <span className="hidden sm:inline text-[15px] text-[color:var(--mist)] shrink-0">{assistant}</span>
           <input ref={inputRef} value={q} onChange={(e) => setQ(e.target.value)} placeholder={askOn ? (thread.length ? "Ask a follow-up" : "Ask a question, or search: GSTAT, TDS on rent...") : "Search every issue: GSTAT, TDS on rent, FEMA reporting..."}
-            onKeyDown={(e) => { if (e.key === "Escape") { if (q) setQ(""); else onClose(); } else if (e.key === "Enter") send(); }}
+            onKeyDown={(e) => { if (e.key === "Escape") { if (q) setQ(""); else onClose(); } else if (e.key === "Enter" && looksLikeQuestion(q)) send(); }}
             enterKeyHint={askOn ? "send" : "search"}
             className="flex-1 min-w-0 bg-transparent text-[18px] sm:text-[19px] placeholder:text-white/40 focus:outline-none" data-testid="spotlight-input" />
           {busy && <Loader2 className="w-5 h-5 animate-spin text-white/50 shrink-0" />}
