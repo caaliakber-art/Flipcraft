@@ -88,6 +88,7 @@ def compose(*, lib: dict, item: dict, heads: list, links: dict, unsub: str) -> t
   {f'<a href="{e(links["site"])}" style="color:#6b7a8c">{e(links["site"].replace("https://", "").replace("http://", "").rstrip("/"))}</a><br>' if links.get('site') else ''}
   You're receiving this because you subscribed to the {e(lib['title'])}. <a href="{unsub}" style="color:#6b7a8c">Unsubscribe</a>
 </td></tr>
+{f'<tr><td align="center" style="padding:14px 40px 4px;font-family:{FONT};font-size:11px;color:#8a97a8">Powered by <a href="{e(links["powered"])}" style="color:#8a97a8;font-weight:500;text-decoration:none">FlipCraft</a></td></tr>' if links.get("powered") else ''}
 </table></td></tr></table></body></html>"""
 
     text = [f"{lib['title']} | {name}", pitch_t, pitch_x, ""]

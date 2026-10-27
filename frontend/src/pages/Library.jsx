@@ -276,7 +276,7 @@ function SearchPanel({ slug, lib, current, readPage, onOpen, onClose, autoFocus 
         </div>
         <label className="relative block">
           <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-white/50" />
-          <input ref={inputRef} value={q} onChange={(e) => setQ(e.target.value)} placeholder="Ask about GSTAT, TDS, FEMA...  ( / )"
+          <input ref={inputRef} value={q} onChange={(e) => setQ(e.target.value)} placeholder="GSTAT, TDS, FEMA...   Press / to search"
             onKeyDown={(e) => e.key === "Escape" && (q ? setQ("") : onClose?.())}
             className="w-full h-11 rounded-xl bg-black/25 border border-white/10 pl-10 pr-9 text-[15px] placeholder:text-white/40 focus:outline-none focus:border-[color:var(--mist)] focus:bg-black/35 transition-colors"
             data-testid="library-search-input" />
@@ -680,7 +680,7 @@ function Wheel({ options, index, onPick, row = 52, className = "", align = "cent
    year wheels underneath to jump straight to an issue. */
 const yearKey = (it) => (undated(it) ? "More" : yearOf(it));
 const wheelLabel = (it) => (undated(it) ? it.label : it.special ? (it.kind || "Special").replace(/\s*edition$/i, "") : monthOf(it));
-function MobileBrowse({ items, latest, onOpen, onActive, tagline, pitch, onSubscribe }) {
+function MobileBrowse({ items, latest, onOpen, onActive, tagline, pitch, onSubscribe, showBadge, slugForBadge }) {
   const touch = useRef(null);
   const ref = useRef(null);
   const raf = useRef(0);
@@ -810,6 +810,7 @@ function MobileBrowse({ items, latest, onOpen, onActive, tagline, pitch, onSubsc
           )}
         </section>
       )}
+      {showBadge && <div className="flex justify-center pt-10 pb-2"><PoweredBy slug={slugForBadge} className="flex" /></div>}
     </div>
   );
 }
@@ -1123,6 +1124,17 @@ function DockRail({ items, current, onOpen }) {
   );
 }
 
+/* A quiet credit in the corner; firms on a paid plan can switch it off (white-label). */
+function PoweredBy({ slug, className = "" }) {
+  return (
+    <a href={`${window.location.origin}/signup?ref=${encodeURIComponent(slug)}`} target="_blank" rel="noopener noreferrer"
+      className={`lib-powered items-center gap-1.5 text-[11px] tracking-[0.02em] text-white/35 hover:text-white/80 transition-colors ${className}`} data-testid="powered-by">
+      <svg viewBox="0 0 16 16" className="w-3 h-3" aria-hidden="true"><path d="M2 3.5 8 2l6 1.5v9L8 14l-6-1.5z" fill="none" stroke="currentColor" strokeWidth="1.3" /><path d="M8 2v12" stroke="currentColor" strokeWidth="1.3" /></svg>
+      Powered by <span className="font-medium">FlipCraft</span>
+    </a>
+  );
+}
+
 /* ------------------------------------------------------------------ add to home screen
    On phones, offer to save the library as an app icon. Android/Chrome gets a real
    one-tap install; iPhone needs Share > Add to Home Screen, so we show those steps. */
@@ -1426,7 +1438,8 @@ export default function Library({ embed = false }) {
             <main className={`min-h-0 overflow-y-auto lib-noscroll transition-opacity duration-300 ${leaving ? "opacity-0" : ""}`}>
               <TopicBar topics={topics} topic={topic} onTopic={pickTopic} total={items.length} className="px-4 pt-4" />
               <MobileBrowse items={shown} latest={latest} onOpen={(x, el) => fly(x, el)} onActive={setFocus} tagline={lib.pitch_title}
-                pitch={{ title: lib.pitch_title, text: lib.pitch_text }} onSubscribe={subscribed ? null : () => setSubOpen("subscribe")} />
+                pitch={{ title: lib.pitch_title, text: lib.pitch_text }} onSubscribe={subscribed ? null : () => setSubOpen("subscribe")}
+                showBadge={lib.show_badge} slugForBadge={slug} />
             </main>
           ) : !open ? (
             <main ref={browseRef} className={`min-h-0 overflow-y-auto lib-scroll transition-[opacity,filter] duration-300 ${leaving ? "opacity-0 blur-[2px]" : ""}`} data-testid="library-browse">
@@ -1525,7 +1538,6 @@ export default function Library({ embed = false }) {
                 {!subscribed && <button onClick={() => setSubOpen("subscribe")} className="hover:text-white underline-offset-4 hover:underline">Subscribe to updates</button>}
                 {lib.offer_credentials && <button onClick={() => setSubOpen("credentials")} className="hover:text-white underline-offset-4 hover:underline" data-testid="request-credentials">Request {shortName(brand.name) || "our"} credentials</button>}
                 <button onClick={() => setShareOf({ item: null, page: 0 })} className="hover:text-white underline-offset-4 hover:underline">Share this library</button>
-                {lib.show_badge && <a href="/" target="_blank" rel="noopener noreferrer" className="ml-auto hover:text-white">Made with FlipCraft</a>}
               </footer>
             </main>
           ) : (
@@ -1548,6 +1560,7 @@ export default function Library({ embed = false }) {
       </div>
 
       <BrandBars className="hidden md:block absolute right-6 bottom-3 z-20" />
+      {lib.show_badge && <PoweredBy slug={slug} className="hidden md:flex absolute right-[188px] bottom-[7px] z-20" />}
 
       {spot && !open && <Spotlight slug={slug} lib={lib} topics={topics} closing={spot === "closing"} onOpen={(it, p) => openIssue(it, p)} onTopic={pickTopic} onClose={closeSpot} />}
 

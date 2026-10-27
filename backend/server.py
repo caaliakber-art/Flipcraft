@@ -86,7 +86,7 @@ PLANS = {
     "free":     {"label": "Free",      "flipbooks": 3,    "libraries": 0, "embed": True, "ai_search": False, "storage_mb": 200,   "remove_badge": False},
     "premium":  {"label": "Premium",   "flipbooks": 50,   "libraries": 3, "embed": True, "ai_search": True,  "storage_mb": 5000,  "remove_badge": True},
     "pro_plus": {"label": "Pro Plus",  "flipbooks": None, "libraries": None, "embed": True, "ai_search": True, "storage_mb": 50000, "remove_badge": True},
-    "demo":     {"label": "Free demo", "flipbooks": None, "libraries": None, "embed": True, "ai_search": True, "storage_mb": 50000, "remove_badge": True},
+    "demo":     {"label": "Free demo", "flipbooks": None, "libraries": None, "embed": True, "ai_search": True, "storage_mb": 50000, "remove_badge": False},
 }
 # Accounts that get the full-feature demo plan on sign-up (comma separated emails)
 DEMO_ACCOUNTS = {e.strip().lower() for e in os.environ.get("DEMO_ACCOUNTS", "").split(",") if e.strip()}
@@ -1194,6 +1194,7 @@ async def email_preview(lid: str, flipbook_id: str, request: Request, ohash: str
     from mailer import compose
     lib = await owned_library(lid, ohash)
     view, item, links = await build_issue_email(lib, flipbook_id, request)
+    links["powered"] = f"{FRONTEND_URL}/signup?ref={lib['slug']}" if view.get("show_badge") else ""
     subject, body, _ = compose(lib=view, item=item, heads=flat_heads(item.get("toc")), links=links, unsub="#")
     count = await db.subscribers.count_documents({"library_id": lid, "status": {"$ne": "unsubscribed"}})
     last = await db.campaigns.find_one({"library_id": lid, "flipbook_id": flipbook_id}, {"_id": 0}, sort=[("sent_at", -1)])
@@ -1221,6 +1222,7 @@ async def email_send(lid: str, body: EmailSend, request: Request, ohash: str = D
         people = [s async for s in db.subscribers.find({"library_id": lid, "status": {"$ne": "unsubscribed"}}, {"_id": 0, "email": 1, "name": 1, "id": 1})]
         if not people:
             raise HTTPException(status_code=400, detail="There are no subscribers yet.")
+    links["powered"] = f"{FRONTEND_URL}/signup?ref={lib['slug']}" if view.get("show_badge") else ""
     subject, html_body, text_body = compose(lib=view, item=item, heads=flat_heads(item.get("toc")), links=links, unsub="{{params.unsub}}")
     sender = {"email": EMAIL_FROM, "name": EMAIL_FROM_NAME or view["brand"].get("name") or view["title"]}
     sent, failed = 0, []
