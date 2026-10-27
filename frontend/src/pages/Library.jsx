@@ -346,7 +346,7 @@ function HandoverForm({ slug, lib, thread, issue, onDone, onCancel }) {
   );
 }
 
-function AskThread({ slug, lib, thread, current, onOpen }) {
+function AskThread({ slug, lib, thread, current, onOpen, onReset }) {
   const brand = shortName(lib.brand?.name) || lib.brand?.name || "us";
   const [sent, setSentState] = useState(() => !!askThreads[`${slug}:sent`]);
   const [talk, setTalk] = useState(sent);
@@ -388,7 +388,8 @@ function AskThread({ slug, lib, thread, current, onOpen }) {
           : (
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12.5px]">
               <button onClick={() => setTalk(true)} className="text-[color:var(--mist)] hover:text-white font-medium" data-testid="ask-talk">Discuss this with {brand}</button>
-              <span className="text-white/35">Ask a follow-up below</span>
+              <span className="text-white/35">or ask a follow-up</span>
+              {onReset && <button onClick={() => { setTalk(false); onReset(); }} className="ml-auto h-7 px-3 rounded-full border border-white/15 text-white/75 hover:bg-white/10 flex items-center gap-1.5" data-testid="ask-reset"><X className="w-3.5 h-3.5" />New question</button>}
             </div>
           )
       )}
@@ -405,7 +406,7 @@ function SearchPanel({ slug, lib, current, readPage, onOpen, onClose, autoFocus 
   const [scope, setScope] = useState("all");
   const { res, busy } = useSearch(slug, q);
   const askOn = !!lib.ask_ai;
-  const { thread, ask, busy: asking } = useAsk(slug, current);
+  const { thread, ask, busy: asking, reset } = useAsk(slug, current);
   const send = () => { if (askOn && q.trim().length >= 2 && !asking) { ask(q); setQ(""); } };
   const inputRef = useRef(null);
   const suggestions = useSuggestions(lib);
@@ -448,7 +449,8 @@ function SearchPanel({ slug, lib, current, readPage, onOpen, onClose, autoFocus 
             enterKeyHint={askOn ? "send" : "search"}
             className="w-full h-11 rounded-xl bg-black/25 border border-white/10 pl-10 pr-9 text-[15px] placeholder:text-white/40 focus:outline-none focus:border-[color:var(--mist)] focus:bg-black/35 transition-colors"
             data-testid="library-search-input" />
-          {busy && <Loader2 className="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 animate-spin text-white/50" />}
+          {busy ? <Loader2 className="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 animate-spin text-white/50" />
+            : q && <button onClick={() => { setQ(""); inputRef.current?.focus(); }} className="absolute right-2 top-1/2 -translate-y-1/2 w-7 h-7 grid place-items-center rounded-full hover:bg-white/10" aria-label="Clear" data-testid="search-clear"><X className="w-3.5 h-3.5" /></button>}
         </label>
         {askOn && q.trim().length >= 2 && (
           <button onClick={send} disabled={asking} className="w-full flex items-center gap-2 rounded-xl bg-white/[0.07] hover:bg-white/[0.12] px-3 h-9 text-[13px] text-white/85 transition-colors disabled:opacity-50" data-testid="ask-send">
@@ -466,7 +468,7 @@ function SearchPanel({ slug, lib, current, readPage, onOpen, onClose, autoFocus 
       </div>
 
       <div className="flex-1 min-h-0 overflow-y-auto lib-scroll p-3">
-        {thread.length > 0 && <div className="px-1.5 pt-1 pb-3"><AskThread slug={slug} lib={lib} thread={thread} current={current} onOpen={onOpen} /></div>}
+        {thread.length > 0 && <div className="px-1.5 pt-1 pb-3"><AskThread slug={slug} lib={lib} thread={thread} current={current} onOpen={onOpen} onReset={() => { reset(); setQ(""); inputRef.current?.focus(); }} /></div>}
         {!res && !thread.length && current && related?.length > 0 && (
           <div className="pb-3" data-testid="related-pages">
             <div className="px-2 pt-1 pb-3">
@@ -502,7 +504,7 @@ function SearchPanel({ slug, lib, current, readPage, onOpen, onClose, autoFocus 
             </div>
           </div>
         )}
-        {res && total === 0 && !busy && <p className="p-3 text-[14px] text-white/60">{askOn && looksLikeQuestion(res.query) ? "Press Enter for an answer from the issues." : `No pages mention “${res.query}”. Try a shorter phrase or a form or section number.`}</p>}
+        {res && total === 0 && !busy && !thread.length && <p className="p-3 text-[14px] text-white/60">{askOn && looksLikeQuestion(res.query) ? "Press Enter for an answer from the issues." : `No pages mention “${res.query}”. Try a shorter phrase or a form or section number.`}</p>}
         {res && total > 0 && <p className="lib-cond px-2 pb-2 text-[12px] text-white/45">{total} {total === 1 ? "page" : "pages"} in {groups.length} {groups.length === 1 ? "issue" : "issues"}</p>}
         <div className="space-y-2">
           {groups.map((g) => <HitGroup key={g[0].flipbook_id} group={g} lib={lib} terms={res.terms} onOpen={onOpen} />)}
@@ -518,7 +520,7 @@ function Spotlight({ slug, lib, topics, closing, onOpen, onTopic, onClose }) {
   const [q, setQ] = useState("");
   const { res, busy } = useSearch(slug, q);
   const askOn = !!lib.ask_ai;
-  const { thread, ask, busy: asking } = useAsk(slug, null);
+  const { thread, ask, busy: asking, reset } = useAsk(slug, null);
   const send = () => { if (askOn && q.trim().length >= 2 && !asking) { ask(q); setQ(""); } };
   const suggestions = useSuggestions(lib);
   const inputRef = useRef(null);
@@ -552,7 +554,7 @@ function Spotlight({ slug, lib, topics, closing, onOpen, onTopic, onClose }) {
                 <Barcode count={3} active={1} height={14} /><span className="truncate">{assistant}: <span className="text-white">{q.trim()}</span></span><kbd className="ml-auto lib-cond text-[11px] text-white/45 border border-white/15 rounded px-1.5 py-0.5 shrink-0">Enter</kbd>
               </button>
             )}
-            {thread.length > 0 && <div className="max-w-[680px] pb-4"><AskThread slug={slug} lib={lib} thread={thread} current={null} onOpen={onOpen} /></div>}
+            {thread.length > 0 && <div className="max-w-[680px] pb-4"><AskThread slug={slug} lib={lib} thread={thread} current={null} onOpen={onOpen} onReset={() => { reset(); setQ(""); inputRef.current?.focus(); }} /></div>}
             {!res && !thread.length && (
               <div className="space-y-5">
                 <div>
@@ -571,7 +573,7 @@ function Spotlight({ slug, lib, topics, closing, onOpen, onTopic, onClose }) {
                 )}
               </div>
             )}
-            {res && total === 0 && !busy && <p className="text-[15px] text-white/65">{askOn && looksLikeQuestion(res.query) ? "Press Enter for an answer from the issues." : `No pages mention “${res.query}”. Try a shorter phrase, or a form or section number.`}</p>}
+            {res && total === 0 && !busy && !thread.length && <p className="text-[15px] text-white/65">{askOn && looksLikeQuestion(res.query) ? "Press Enter for an answer from the issues." : `No pages mention “${res.query}”. Try a shorter phrase, or a form or section number.`}</p>}
             {res && total > 0 && <p className="lib-cond pb-3 text-[12.5px] text-white/50">{total} {total === 1 ? "page" : "pages"} in {groups.length} {groups.length === 1 ? "issue" : "issues"}</p>}
             <div className="grid md:grid-cols-2 gap-2.5 items-start">
               {groups.map((g) => <HitGroup key={g[0].flipbook_id} group={g} lib={lib} terms={res.terms} onOpen={onOpen} />)}

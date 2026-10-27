@@ -1637,8 +1637,12 @@ async def ask_library(slug: str, body: AskIn, request: Request):
         data["ask_index"] = await asyncio.to_thread(ask_mod.build_index, data["pages"])
     q = body.question.strip()
     recent = " ".join(t.q for t in body.history[-1:])
-    pages = ask_mod.retrieve(data["ask_index"], q, data["meta"], boost_issue=body.flipbook_id or None)
-    if len(pages) < 3 and recent:
+    named = ask_mod.named_issues(q, data["meta"], body.flipbook_id or None)
+    if named:
+        pages = ask_mod.issue_pages(data["pages"], named, q, data["ask_index"], data["meta"])
+    else:
+        pages = ask_mod.retrieve(data["ask_index"], q, data["meta"], boost_issue=body.flipbook_id or None)
+    if not named and len(pages) < 3 and recent:
         more = ask_mod.retrieve(data["ask_index"], f"{q} {recent}", data["meta"], boost_issue=body.flipbook_id or None)
         pages += [p for p in more if p not in pages][: 8 - len(pages)]
     brand = await get_brand(lib["owner_hash"]) or {}
