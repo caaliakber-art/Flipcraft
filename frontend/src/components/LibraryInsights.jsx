@@ -95,6 +95,46 @@ export function LibraryStats({ id }) {
   );
 }
 
+/* Every question asked through Ask, newest first: what readers want, and where
+   the issues had no answer (a topic worth writing about). */
+export function Questions({ id, lib }) {
+  const [list, setList] = useState(null);
+  const [open, setOpen] = useState(null);
+  const [filter, setFilter] = useState("all");
+  useEffect(() => { api.get(`/libraries/${id}/questions`).then((r) => setList(r.data)).catch(() => setList(false)); }, [id]);
+  if (list === false) return <p className="text-sm text-slate-400">Questions couldn't be loaded.</p>;
+  if (!list) return <p className="text-sm text-slate-500">Loading questions...</p>;
+  if (!list.length) return <p className="text-sm text-slate-500 rounded-xl border border-dashed border-white/10 p-6 text-center">No questions yet. They'll appear here when readers use Ask on the library.</p>;
+  const label = (fid) => (lib?.items || []).find((i) => i.flipbook_id === fid)?.label || "Issue";
+  const gaps = list.filter((q) => !q.covered).length;
+  const shown = filter === "gaps" ? list.filter((q) => !q.covered) : filter === "talk" ? list.filter((q) => q.handover) : list;
+  return (
+    <div className="space-y-3" data-testid="library-questions">
+      <div className="flex flex-wrap items-center gap-2 text-sm">
+        {[["all", `All ${list.length}`], ["gaps", `Not covered ${gaps}`], ["talk", `Needs a conversation ${list.filter((q) => q.handover).length}`]].map(([k, l]) => (
+          <button key={k} onClick={() => setFilter(k)} className={`h-8 px-3 rounded-full ${filter === k ? "bg-white text-slate-900" : "border border-white/10 text-slate-300 hover:bg-white/5"}`}>{l}</button>
+        ))}
+        <span className="text-xs text-slate-500 ml-auto">"Not covered" questions are ideas for the next issue.</span>
+      </div>
+      <div className="divide-y divide-white/5 rounded-xl border border-white/10">
+        {shown.slice(0, 100).map((q) => (
+          <button key={q.id} onClick={() => setOpen(open === q.id ? null : q.id)} className="w-full text-left p-3 hover:bg-white/[0.03]">
+            <div className="flex items-start gap-3">
+              <div className="flex-1 min-w-0">
+                <div className="text-sm">{q.question}</div>
+                <div className="text-xs text-slate-500 mt-0.5">{fmtDate(q.created_at)}{q.follow_up ? " · follow-up" : ""}{q.sources?.length ? ` · ${q.sources.map(([f, p]) => `${label(f)} p${p + 1}`).join(", ")}` : ""}</div>
+              </div>
+              {!q.covered && <span className="shrink-0 text-[11px] rounded-full bg-amber-400/15 text-amber-300 px-2 py-0.5">Not covered</span>}
+              {q.handover && <span className="shrink-0 text-[11px] rounded-full bg-blue-400/15 text-blue-300 px-2 py-0.5">Needs a conversation</span>}
+            </div>
+            {open === q.id && <p className="mt-2 text-sm text-slate-300 whitespace-pre-line rounded-lg bg-white/[0.03] p-3">{q.answer}</p>}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 const STATUS = { new: "New", contacted: "Contacted", added: "Added to list", unsubscribed: "Unsubscribed" };
 
 export function Subscribers({ id, title }) {
@@ -109,8 +149,9 @@ export function Subscribers({ id, title }) {
     try { await api.delete(`/libraries/${id}/subscribers/${sid}`); setList((l) => l.filter((x) => x.id !== sid)); } catch (e) { toast.error(errMsg(e)); }
   };
   const exportCsv = () => {
-    const cols = ["name", "email", "organisation", "phone", "interests", "wants_credentials", "message", "status", "created_at"];
-    const esc = (v) => `"${String(Array.isArray(v) ? v.join("; ") : v ?? "").replace(/"/g, '""')}"`;
+    const cols = ["name", "email", "organisation", "phone", "interests", "wants_credentials", "source", "newsletter", "message", "transcript", "status", "created_at"];
+    const flat = (v) => (Array.isArray(v) ? v.map((t) => (t && typeof t === "object" ? `Q: ${t.q} A: ${t.a}` : t)).join("; ") : v ?? "");
+    const esc = (v) => `"${String(flat(v)).replace(/"/g, '""')}"`;
     const csv = [cols.join(","), ...list.map((x) => cols.map((c) => esc(x[c])).join(","))].join("\n");
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
@@ -123,7 +164,7 @@ export function Subscribers({ id, title }) {
   return (
     <div className="space-y-3" data-testid="library-subscribers">
       <div className="flex items-center justify-between gap-3">
-        <p className="text-sm text-slate-400">People who asked to join from the library's Subscribe button.</p>
+        <p className="text-sm text-slate-400">People who subscribed, and readers who asked for a conversation from an Ask answer.</p>
         <Button variant="secondary" size="sm" onClick={exportCsv} disabled={!list.length}><Download className="w-4 h-4 mr-2" />Export CSV</Button>
       </div>
       {list.length === 0 ? <p className="text-sm text-slate-500 rounded-xl border border-dashed border-white/10 p-6 text-center">No subscribers yet. They'll appear here as soon as someone subscribes.</p> : (
@@ -133,7 +174,17 @@ export function Subscribers({ id, title }) {
               <div className="flex-1 min-w-[200px]">
                 <div className="font-medium">{x.name}<span className="text-slate-400 font-normal">{x.organisation && `, ${x.organisation}`}</span></div>
                 <div className="text-sm text-slate-300"><a href={`mailto:${x.email}`} className="hover:underline">{x.email}</a>{x.phone && <span className="text-slate-400">  ·  {x.phone}</span>}</div>
+                {x.source === "ask" && <div className="inline-block mt-1 mr-1 text-[11px] font-medium rounded-full bg-blue-400/15 text-blue-300 px-2 py-0.5">Asked for a conversation{x.asked_at ? `, ${fmtDate(x.asked_at)}` : ""}</div>}
+                {x.newsletter === false && <div className="inline-block mt-1 mr-1 text-[11px] rounded-full bg-white/5 text-slate-400 px-2 py-0.5">Not on the issue email</div>}
                 {x.wants_credentials && <div className="inline-block mt-1 text-[11px] font-medium rounded-full bg-amber-400/15 text-amber-300 px-2 py-0.5">Requested credentials</div>}
+                {x.transcript?.length > 0 && (
+                  <details className="mt-2 text-sm">
+                    <summary className="cursor-pointer text-slate-400 hover:text-slate-200">Their questions ({x.transcript.length})</summary>
+                    <div className="mt-2 space-y-2 rounded-lg bg-white/[0.03] p-3">
+                      {x.transcript.map((t, i) => <div key={i}><div className="text-slate-200">{t.q}</div><div className="text-slate-400 text-xs mt-0.5 whitespace-pre-line">{t.a}</div></div>)}
+                    </div>
+                  </details>
+                )}
                 {x.interests?.length > 0 && <div className="text-xs text-slate-400 mt-1">Interested in {x.interests.join(", ")}</div>}
                 {x.message && <div className="text-sm text-slate-300 mt-1 italic">“{x.message}”</div>}
                 <div className="text-xs text-slate-500 mt-1">{fmtDate(x.created_at)}</div>

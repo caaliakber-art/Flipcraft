@@ -20,6 +20,7 @@ import uuid
 
 import pymupdf as fitz
 from toc import parse_toc
+import ask as ask_mod
 import bcrypt
 import jwt
 import secrets
@@ -705,7 +706,8 @@ async def library_view(lib: dict, public: bool) -> dict:
             "items": items, "brand": Brand(**brand).model_dump() if brand else Brand().model_dump(),
             "show_badge": not plan["remove_badge"], "updated_at": lib.get("updated_at", lib["created_at"]),
             "pitch_title": lib.get("pitch_title", ""), "pitch_text": lib.get("pitch_text", ""),
-            "offer_credentials": bool(lib.get("offer_credentials"))}
+            "offer_credentials": bool(lib.get("offer_credentials")),
+            "ask_ai": bool(plan.get("ai_search") and ask_mod.key())}
 
 
 @api.get("/libraries")
@@ -1273,7 +1275,7 @@ async def email_preview(lid: str, flipbook_id: str, request: Request, ohash: str
     view, item, links = await build_issue_email(lib, flipbook_id, request)
     links["powered"] = f"{FRONTEND_URL}/signup?ref={lib['slug']}" if view.get("show_badge") else ""
     subject, body, _ = compose(lib=view, item=item, heads=flat_heads(item.get("toc")), links=links, unsub="#")
-    count = await db.subscribers.count_documents({"library_id": lid, "status": {"$ne": "unsubscribed"}})
+    count = await db.subscribers.count_documents({"library_id": lid, "status": {"$ne": "unsubscribed"}, "newsletter": {"$ne": False}})
     last = await db.campaigns.find_one({"library_id": lid, "flipbook_id": flipbook_id}, {"_id": 0}, sort=[("sent_at", -1)])
     return {"subject": subject, "html": body, "recipients": count, "configured": bool(BREVO_KEY and EMAIL_FROM),
             "from": f"{EMAIL_FROM_NAME or view['brand'].get('name') or ''} <{EMAIL_FROM}>" if EMAIL_FROM else "", "last_sent": last}
@@ -1296,7 +1298,7 @@ async def email_send(lid: str, body: EmailSend, request: Request, ohash: str = D
     else:
         if not body.resend and await db.campaigns.find_one({"library_id": lid, "flipbook_id": body.flipbook_id, "test": False}, {"_id": 1}):
             raise HTTPException(status_code=409, detail="This issue has already been emailed to subscribers.")
-        people = [s async for s in db.subscribers.find({"library_id": lid, "status": {"$ne": "unsubscribed"}}, {"_id": 0, "email": 1, "name": 1, "id": 1})]
+        people = [s async for s in db.subscribers.find({"library_id": lid, "status": {"$ne": "unsubscribed"}, "newsletter": {"$ne": False}}, {"_id": 0, "email": 1, "name": 1, "id": 1})]
         if not people:
             raise HTTPException(status_code=400, detail="There are no subscribers yet.")
     links["powered"] = f"{FRONTEND_URL}/signup?ref={lib['slug']}" if view.get("show_badge") else ""
@@ -1348,6 +1350,9 @@ class SubscribeIn(BaseModel):
     issue: str = Field("", max_length=40)
     website: str = Field("", max_length=200)  # honeypot: people never see this field
     wants_credentials: bool = False
+    source: Literal["subscribe", "ask"] = "subscribe"
+    newsletter: bool = True
+    transcript: List[Dict[str, str]] = Field(default_factory=list, max_length=8)
 
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]{2,}$")
@@ -1385,6 +1390,21 @@ async def subscribe(slug: str, body: SubscribeIn, request: Request):
     upd = {"$set": doc, "$setOnInsert": insert}
     if body.wants_credentials:
         doc["wants_credentials"] = True
+    if body.source == "ask":
+        # "Discuss with us" from an Ask answer: a conversation request, not a newsletter sign-up
+        # unless they ticked the box.
+        doc["source"] = "ask"
+        doc["transcript"] = [{"q": (t.get("q") or "")[:600], "a": (t.get("a") or "")[:2000]} for t in body.transcript][-6:]
+        doc["asked_at"] = now_iso()
+        if body.newsletter:
+            doc["newsletter"] = True
+        elif not prev:
+            insert["newsletter"] = False
+        if prev and prev.get("status") in ("contacted", "added"):
+            doc["status"] = "new"  # a fresh request should be seen again
+            insert.pop("status", None)
+    elif body.newsletter:
+        doc["newsletter"] = True
     interests = [i.strip()[:60] for i in body.interests if i.strip()]
     if interests:
         upd["$addToSet"] = {"interests": {"$each": interests}}
@@ -1565,6 +1585,89 @@ async def related_pages(slug: str, flipbook_id: str, page: int = 1):
     return {"results": out}
 
 
+# ---------------------------------------------------------------- Ask (AI answers from the pages)
+class AskTurn(BaseModel):
+    q: str = Field("", max_length=600)
+    a: str = Field("", max_length=2400)
+
+
+class AskIn(BaseModel):
+    question: str = Field(min_length=2, max_length=500)
+    history: List[AskTurn] = Field(default_factory=list, max_length=6)
+    flipbook_id: str = Field("", max_length=40)
+
+
+ask_hits: Dict[str, list] = {}
+ask_day: Dict[str, int] = {}
+ASK_PER_HOUR = int(os.environ.get("ASK_PER_HOUR", "20"))
+ASK_PER_DAY = int(os.environ.get("ASK_PER_DAY", "400"))  # whole site; keeps the free tier safe
+
+
+def firm_short(name: str) -> str:
+    skip = re.compile(r"^(llp|ltd|limited|pvt|private|inc|co|company|and|&|the|of)$", re.I)
+    words = [w for w in re.sub(r"[.,]", " ", name or "").split() if w and not skip.match(w) and w[0].isupper()]
+    if not words:
+        return ""
+    return words[0] if len(words) == 1 else "".join(w[0] for w in words).upper()
+
+
+@api.post("/public/libraries/{slug}/ask")
+async def ask_library(slug: str, body: AskIn, request: Request):
+    lib = await db.libraries.find_one({"slug": slug, "is_deleted": False}, {"_id": 0})
+    if not lib:
+        raise HTTPException(status_code=404, detail="Library not found")
+    plan = await workspace_plan(lib["owner_hash"])
+    if not plan.get("ai_search") or not ask_mod.key():
+        raise HTTPException(status_code=503, detail="Ask isn't switched on for this library.")
+    ip = (request.headers.get("x-forwarded-for") or (request.client.host if request.client else "")).split(",")[0].strip()
+    now = datetime.now(timezone.utc)
+    hits = [t for t in ask_hits.get(ip, []) if now.timestamp() - t < 3600]
+    if len(hits) >= ASK_PER_HOUR:
+        raise HTTPException(status_code=429, detail="You've asked a lot of questions this hour. Please try again a little later.")
+    day = now.strftime("%Y-%m-%d")
+    if ask_day.get(day, 0) >= ASK_PER_DAY:
+        raise HTTPException(status_code=429, detail="Ask has reached today's limit. Search still works, and you can try again tomorrow.")
+    ask_hits[ip] = hits + [now.timestamp()]
+    if day not in ask_day:
+        ask_day.clear()
+    ask_day[day] = ask_day.get(day, 0) + 1
+
+    data = await library_pages(slug)
+    if "ask_index" not in data:
+        data["ask_index"] = await asyncio.to_thread(ask_mod.build_index, data["pages"])
+    q = body.question.strip()
+    recent = " ".join(t.q for t in body.history[-1:])
+    pages = ask_mod.retrieve(data["ask_index"], q, data["meta"], boost_issue=body.flipbook_id or None)
+    if len(pages) < 3 and recent:
+        more = ask_mod.retrieve(data["ask_index"], f"{q} {recent}", data["meta"], boost_issue=body.flipbook_id or None)
+        pages += [p for p in more if p not in pages][: 8 - len(pages)]
+    brand = await get_brand(lib["owner_hash"]) or {}
+    firm = brand.get("name") or "the publisher"
+    try:
+        out = await ask_mod.ask(question=q, history=[t.model_dump() for t in body.history], pages=pages, meta=data["meta"],
+                                firm=firm, short=firm_short(firm) or firm, title=lib["title"])
+    except ask_mod.AskError as e:
+        raise HTTPException(status_code=e.status, detail=e.message)
+    sources = []
+    for n in dict.fromkeys(out["sources"]):
+        if 1 <= n <= len(pages):
+            p = pages[n - 1]
+            m = data["meta"].get(p["flipbook_id"], {})
+            sources.append({"n": n, "flipbook_id": p["flipbook_id"], "page": p["page"], "label": m.get("label", ""), "kind": m.get("kind", ""), "special": bool(m.get("special"))})
+    if not out["covered"]:
+        sources = []
+    await db.asks.insert_one({"id": uuid.uuid4().hex[:12], "library_id": lib["id"], "question": q, "answer": out["answer"],
+                              "covered": out["covered"], "handover": out["handover"], "sources": [[s["flipbook_id"], s["page"]] for s in sources],
+                              "model": out.get("model"), "follow_up": bool(body.history), "created_at": now_iso()})
+    return {"answer": out["answer"], "sources": sources, "covered": out["covered"], "handover": out["handover"]}
+
+
+@api.get("/libraries/{lid}/questions")
+async def library_questions(lid: str, ohash: str = Depends(require_owner)):
+    await owned_library(lid, ohash)
+    return await db.asks.find({"library_id": lid}, {"_id": 0}).sort("created_at", -1).to_list(200)
+
+
 @api.get("/files/{path:path}")
 async def serve_file(path: str, request: Request):
     record = await db.files.find_one({"storage_path": path, "is_deleted": False}, {"_id": 0})
@@ -1640,6 +1743,7 @@ async def startup():
     await db.subscribers.create_index([("library_id", 1), ("email", 1)], unique=True)
     await db.reactions.create_index([("flipbook_id", 1), ("visitor", 1)], unique=True)
     await db.pagetext.create_index([("flipbook_id", 1), ("page", 1)], unique=True)
+    await db.asks.create_index([("library_id", 1), ("created_at", -1)])
     try:
         await asyncio.to_thread(store.head_bucket, Bucket=S3_BUCKET)
         logger.info(f"Storage ready (bucket: {S3_BUCKET})")

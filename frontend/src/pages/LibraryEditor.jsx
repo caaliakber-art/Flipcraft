@@ -6,7 +6,7 @@ import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Switch } from "../components/ui/switch";
 import { api, copyText, errMsg, fileUrl } from "../lib/api";
-import { LibraryStats, Subscribers } from "../components/LibraryInsights";
+import { LibraryStats, Questions, Subscribers } from "../components/LibraryInsights";
 import { DatesDialog, EmailDialog, datesLabel } from "../components/IssueTools";
 
 const Field = ({ label, children }) => (
@@ -181,7 +181,12 @@ export default function LibraryEditor() {
           </section>
 
           <section className="space-y-3">
-            <h2 className="font-display font-semibold">Subscribers</h2>
+            <h2 className="font-display font-semibold">Questions readers asked</h2>
+            <Questions id={id} lib={lib} />
+          </section>
+
+          <section className="space-y-3">
+            <h2 className="font-display font-semibold">Subscribers and conversation requests</h2>
             <Subscribers id={id} title={lib.title} />
           </section>
         </div>
