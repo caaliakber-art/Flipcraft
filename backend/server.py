@@ -21,6 +21,7 @@ import uuid
 import pymupdf as fitz
 from toc import parse_toc
 import ask as ask_mod
+from covermask import cover_mask
 import bcrypt
 import jwt
 import secrets
@@ -326,7 +327,11 @@ async def _convert(fid: str, path: str, ohash: str, pdf_path: Optional[str] = No
         doc = await asyncio.to_thread(fitz.open, path)
         count = doc.page_count
         rect = doc[0].rect
-        await db.flipbooks.update_one({"id": fid}, {"$set": {"page_count": count, "page_width": rect.width, "page_height": rect.height}})
+        try:
+            mask = await asyncio.to_thread(cover_mask, doc[0])
+        except Exception:
+            mask = None
+        await db.flipbooks.update_one({"id": fid}, {"$set": {"page_count": count, "page_width": rect.width, "page_height": rect.height, "cover_mask": mask}})
         pages, thumbs = [], []
         for i in range(count):
             page = doc[i]
@@ -690,7 +695,7 @@ def sort_items(items: list) -> list:
 async def library_view(lib: dict, public: bool) -> dict:
     ids = [i["flipbook_id"] for i in lib.get("items", [])]
     books = {b["id"]: b async for b in db.flipbooks.find({"id": {"$in": ids}, "is_deleted": False},
-                                                          {"_id": 0, "id": 1, "title": 1, "status": 1, "error": 1, "thumbs": 1, "pages": 1, "page_count": 1, "pages_done": 1, "toc": 1, "page_width": 1, "page_height": 1})}
+                                                          {"_id": 0, "id": 1, "title": 1, "status": 1, "error": 1, "thumbs": 1, "pages": 1, "page_count": 1, "pages_done": 1, "toc": 1, "page_width": 1, "page_height": 1, "cover_mask": 1})}
     items = []
     for it in sort_items(lib.get("items", [])):
         b = books.get(it["flipbook_id"])
@@ -699,7 +704,7 @@ async def library_view(lib: dict, public: bool) -> dict:
         items.append({**it, "status": b["status"], "page_count": b.get("page_count", 0), "pages_done": b.get("pages_done", 0), "error": b.get("error") if b["status"] == "failed" else None,
                       "cover": (b.get("pages") or [""])[0], "thumb": (b.get("thumbs") or [""])[0],
                       "aspect": (b.get("page_width") or 595) / max(b.get("page_height") or 842, 1),
-                      "toc": b.get("toc", []) if public else [], "title": b["title"]})
+                      "toc": b.get("toc", []) if public else [], "title": b["title"], "cover_mask": b.get("cover_mask")})
     plan = await workspace_plan(lib["owner_hash"])
     brand = await get_brand(lib["owner_hash"])
     return {"id": lib["id"], "slug": lib["slug"], "title": lib["title"], "subtitle": lib.get("subtitle", ""),
@@ -1766,6 +1771,31 @@ async def startup():
             asyncio.create_task(convert_job(fb["id"], fb["owner_hash"]))
         else:
             await db.flipbooks.update_one({"id": fb["id"]}, {"$set": {"status": "failed", "error": INTERRUPTED}})
+    asyncio.create_task(backfill_cover_masks())
+
+
+async def backfill_cover_masks():
+    """Issues converted before cover masks existed: read just the cover of each saved PDF."""
+    await asyncio.sleep(20)
+    async for fb in db.flipbooks.find({"status": "ready", "is_deleted": False, "cover_mask": {"$exists": False}}, {"_id": 0, "id": 1, "pdf_path": 1}):
+        if not fb.get("pdf_path"):
+            continue
+        local = CACHE_DIR / f"cover-{fb['id']}.pdf"
+        async with convert_lock:
+            try:
+                await asyncio.to_thread(download_to, fb["pdf_path"], local)
+                def one():
+                    with fitz.open(str(local)) as d:
+                        return cover_mask(d[0])
+                mask = await asyncio.to_thread(one)
+                await db.flipbooks.update_one({"id": fb["id"]}, {"$set": {"cover_mask": mask}})
+            except Exception as e:
+                logger.warning("Cover mask for %s failed: %s", fb["id"], e)
+            finally:
+                local.unlink(missing_ok=True)
+                fitz.TOOLS.store_shrink(100)
+                gc.collect()
+        await asyncio.sleep(0.5)
 
 
 @app.on_event("shutdown")

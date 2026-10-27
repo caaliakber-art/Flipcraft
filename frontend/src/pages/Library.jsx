@@ -1190,6 +1190,10 @@ function Reader({ slug, lib, item, items, startPage, embed, onOpen, onBack, onPa
   const label = portrait || page === 0 || page === n - 1 ? `${page + 1}` : `${page + 1}–${Math.min(page + 2, n)}`;
   const blankLeft = !portrait && rect && page === 0 && zoom === 1;
   const blankRight = !portrait && rect && page === n - 1 && n % 2 === 0 && zoom === 1;
+  // The cover's own contents list repeats the linked index beside it, so it is painted over.
+  const mask = item.cover_mask;
+  const coverMask = !portrait && rect && page === 0 && zoom === 1 && mask?.cut > 0;
+  const atEnd = n > 1 && (portrait ? page >= n - 1 : page >= n - 2);
   const share = () => onShare(item, page);
   const shareHead = (h) => onShare(item, h.page ?? page, h);
   const goTo = (p) => { const r = flipRef.current?.go(p); if (r != null) setPage(r); setTimeout(measure, 60); };
@@ -1225,6 +1229,13 @@ function Reader({ slug, lib, item, items, startPage, embed, onOpen, onBack, onPa
                 <IssuePanel item={item} lib={lib} slug={slug} onShareHead={shareHead} onGo={goTo} onStart={() => flipRef.current?.next()} />
               </div>
             )}
+            {coverMask && (
+              <div className={`absolute z-[4] fc-cover-mask pointer-events-none transition-opacity duration-300 ${moving ? "opacity-0" : "opacity-100"}`} aria-hidden="true" data-testid="cover-mask"
+                style={{ left: rect.left + rect.pageWidth * 1.04, top: rect.top + rect.height * mask.cut, width: rect.pageWidth * 0.96 - 2, height: rect.height * (1 - mask.cut) - 2,
+                  background: `linear-gradient(180deg, ${mask.top}, ${mask.mid} 55%, ${mask.bottom})` }}>
+                <div className="absolute left-[11%] bottom-[7%] flex items-end gap-3 opacity-70"><BrandBars /><span className="lib-cond text-[12px] tracking-[0.12em] uppercase text-white/60">{n} pages</span></div>
+              </div>
+            )}
             {blankRight && (
               <div className={`absolute fc-inside fc-inside-right ${moving ? "z-0" : "z-[5]"}`} style={{ left: rect.left + rect.pageWidth, top: rect.top, width: rect.pageWidth, height: rect.height }}>
                 <NextPanel next={next} onOpen={(it) => onOpen(it, 0)} onBack={onBack} onSubscribe={onSubscribe} subscribed={subscribed} />
@@ -1233,12 +1244,17 @@ function Reader({ slug, lib, item, items, startPage, embed, onOpen, onBack, onPa
           </div>
         </div>
       </div>
-      <div className="shrink-0 flex items-center justify-center gap-4 pt-1 pb-2 px-3">
+      <div className="shrink-0 flex flex-wrap items-center justify-center gap-x-4 gap-y-2 pt-1 pb-2 px-3">
         {portrait && item.toc?.length > 0 && (
           <button onClick={() => setContents(true)} className="h-8 px-3.5 rounded-full lib-glass text-[13px] shrink-0" data-testid="reader-contents">Contents</button>
         )}
         <Barcode count={n} active={page} done={seen} onPick={(i) => { const r = flipRef.current?.go(i); if (r != null) setPage(r); setTimeout(measure, 60); }} labels={book.pages.map((_, i) => `Page ${i + 1}`)} height={16} />
         <UsefulButton key={item.flipbook_id} slug={slug} item={item} />
+        {atEnd && !blankRight && (
+          <button onClick={() => (next ? onOpen(next, 0) : onBack())} className="h-9 pl-1.5 pr-4 rounded-full lib-glass hover:bg-white/15 flex items-center gap-2.5 text-[13.5px] shrink-0 lib-swap" data-testid="end-next">
+            {next ? <><img src={fileUrl(next.thumb)} alt="" className="h-6 rounded-[2px] shadow" /><span><span className="text-white/55">Next issue</span> {next.special ? next.kind : next.label}</span></> : <span className="pl-2">Back to all issues</span>}
+          </button>
+        )}
       </div>
       <div className="shrink-0 flex justify-center pb-4 pt-1">
         <ViewerToolbar label={`${label} / ${n}`} canPrev={page > 0} canNext={page < n - (portrait ? 1 : 2) || (page === 0 && n > 1)} onPrev={() => flipRef.current.prev()} onNext={() => flipRef.current.next()}
