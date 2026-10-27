@@ -289,12 +289,35 @@ async def owned_flipbook(fid: str, ohash: str) -> dict:
 convert_lock = asyncio.Semaphore(int(os.environ.get("CONVERT_CONCURRENCY", "1")))
 
 
-async def convert_job(fid: str, data: bytes, ohash: str):
+async def convert_job(fid: str, ohash: str):
+    """One PDF at a time, read back from storage: the upload is saved before conversion
+    starts, so a restart (deploy, sleep, low memory) can pick the job up again."""
     async with convert_lock:
-        await _convert(fid, data, ohash)
+        fb = await db.flipbooks.find_one({"id": fid}, {"_id": 0, "pdf_src": 1, "status": 1})
+        if not fb or fb.get("status") != "processing":
+            return
+        if not fb.get("pdf_src"):
+            await db.flipbooks.update_one({"id": fid}, {"$set": {"status": "failed", "error": INTERRUPTED}})
+            return
+        local = CACHE_DIR / f"src-{fid}.pdf"
+        try:
+            if not local.exists():
+                await asyncio.to_thread(download_to, fb["pdf_src"], local)
+            data = await asyncio.to_thread(local.read_bytes)
+        except Exception as e:
+            logger.exception("Could not read stored PDF")
+            await db.flipbooks.update_one({"id": fid}, {"$set": {"status": "failed", "error": f"Stored PDF could not be read: {e}"[:300]}})
+            return
+        try:
+            await _convert(fid, data, ohash, pdf_path=fb["pdf_src"])
+        finally:
+            local.unlink(missing_ok=True)
 
 
-async def _convert(fid: str, data: bytes, ohash: str):
+INTERRUPTED = "The upload was interrupted before it finished. Please remove it and upload the PDF again."
+
+
+async def _convert(fid: str, data: bytes, ohash: str, pdf_path: Optional[str] = None):
     try:
         doc = await asyncio.to_thread(fitz.open, stream=data, filetype="pdf")
         count = doc.page_count
@@ -320,7 +343,7 @@ async def _convert(fid: str, data: bytes, ohash: str):
             toc = []
         doc.close()
         await db.flipbooks.update_one({"id": fid}, {"$set": {"toc": toc}})
-        pdf_path = await store_file(data, "application/pdf", "pdf", f"pages/{fid}", ohash, private=True)
+        pdf_path = pdf_path or await store_file(data, "application/pdf", "pdf", f"pages/{fid}", ohash, private=True)
         await db.flipbooks.update_one({"id": fid}, {"$set": {"pages": pages, "thumbs": thumbs, "pdf_path": pdf_path, "status": "ready", "updated_at": now_iso()}})
         if (await db.flipbooks.find_one({"id": fid}, {"is_deleted": 1})).get("is_deleted"):
             await db.files.update_many({"storage_path": {"$regex": f"^{APP_NAME}/pages/{fid}/"}}, {"$set": {"is_deleted": True}})
@@ -411,10 +434,13 @@ async def create_flipbook(background: BackgroundTasks, file: UploadFile = File(.
         raise HTTPException(status_code=400, detail="This PDF could not be read")
     fid = uuid.uuid4().hex[:12]
     name = (title or (file.filename or "Untitled").rsplit(".", 1)[0]).strip()[:150] or "Untitled"
+    # keep the PDF safe first; the page images are made from this copy
+    pdf_src = await store_file(data, "application/pdf", "pdf", f"pages/{fid}", ohash, name=file.filename or "", private=True)
+    del data
     fb = {"id": fid, "title": name, "owner_hash": ohash, "status": "processing", "page_count": 0, "pages_done": 0,
-          "pages": [], "thumbs": [], "overlays": [], "sound": True, "is_deleted": False, "created_at": now_iso()}
+          "pages": [], "thumbs": [], "overlays": [], "sound": True, "is_deleted": False, "created_at": now_iso(), "pdf_src": pdf_src}
     await db.flipbooks.insert_one(dict(fb))
-    background.add_task(convert_job, fid, data, ohash)
+    background.add_task(convert_job, fid, ohash)
     return public_view(fb, await get_brand(ohash))
 
 
@@ -646,13 +672,13 @@ def sort_items(items: list) -> list:
 async def library_view(lib: dict, public: bool) -> dict:
     ids = [i["flipbook_id"] for i in lib.get("items", [])]
     books = {b["id"]: b async for b in db.flipbooks.find({"id": {"$in": ids}, "is_deleted": False},
-                                                          {"_id": 0, "id": 1, "title": 1, "status": 1, "thumbs": 1, "pages": 1, "page_count": 1, "pages_done": 1, "toc": 1, "page_width": 1, "page_height": 1})}
+                                                          {"_id": 0, "id": 1, "title": 1, "status": 1, "error": 1, "thumbs": 1, "pages": 1, "page_count": 1, "pages_done": 1, "toc": 1, "page_width": 1, "page_height": 1})}
     items = []
     for it in sort_items(lib.get("items", [])):
         b = books.get(it["flipbook_id"])
         if not b or (public and b["status"] != "ready"):
             continue
-        items.append({**it, "status": b["status"], "page_count": b.get("page_count", 0), "pages_done": b.get("pages_done", 0),
+        items.append({**it, "status": b["status"], "page_count": b.get("page_count", 0), "pages_done": b.get("pages_done", 0), "error": b.get("error") if b["status"] == "failed" else None,
                       "cover": (b.get("pages") or [""])[0], "thumb": (b.get("thumbs") or [""])[0],
                       "aspect": (b.get("page_width") or 595) / max(b.get("page_height") or 842, 1),
                       "toc": b.get("toc", []) if public else [], "title": b["title"]})
@@ -1608,6 +1634,13 @@ async def startup():
     await db.brands.create_index("owner_hash", unique=True)
     await db.stats.create_index("flipbook_id", unique=True)
     await db.visitors.create_index([("flipbook_id", 1), ("visitor", 1)], unique=True)
+    # finish conversions a restart cut short; older uploads without a saved PDF can't be resumed
+    async for fb in db.flipbooks.find({"status": "processing", "is_deleted": False}, {"_id": 0, "id": 1, "owner_hash": 1, "pdf_src": 1}):
+        if fb.get("pdf_src"):
+            await db.flipbooks.update_one({"id": fb["id"]}, {"$set": {"pages_done": 0}})
+            asyncio.create_task(convert_job(fb["id"], fb["owner_hash"]))
+        else:
+            await db.flipbooks.update_one({"id": fb["id"]}, {"$set": {"status": "failed", "error": INTERRUPTED}})
 
 
 @app.on_event("shutdown")

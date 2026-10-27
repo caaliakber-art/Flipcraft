@@ -126,7 +126,15 @@ export default function LibraryEditor() {
           </section>
 
           <section className="space-y-3">
-            <h2 className="font-display font-semibold">Issues <span className="text-slate-500 text-sm ml-1">{items.length}</span></h2>
+            <div className="flex items-center gap-3">
+              <h2 className="font-display font-semibold">Issues <span className="text-slate-500 text-sm ml-1">{items.length}</span></h2>
+              {items.some((i) => i.status === "failed") && (
+                <Button variant="secondary" size="sm" className="ml-auto" data-testid="remove-failed"
+                  onClick={() => { setItems((l) => l.filter((i) => i.status !== "failed")); setDirty(true); toast.message("Interrupted uploads removed. Save changes, then upload those PDFs again."); }}>
+                  Remove {items.filter((i) => i.status === "failed").length} interrupted upload{items.filter((i) => i.status === "failed").length === 1 ? "" : "s"}
+                </Button>
+              )}
+            </div>
             {items.length === 0 && <p className="text-sm text-slate-400">No issues yet. Add PDFs above.</p>}
             <div className="divide-y divide-white/5 rounded-xl border border-white/10">
               {items.map((it) => (
@@ -137,7 +145,8 @@ export default function LibraryEditor() {
                     <Input type="month" value={it.date} onChange={(e) => setItem(it.flipbook_id, { date: e.target.value })} aria-label="Issue month" />
                     {it.special && <Input value={it.kind} onChange={(e) => setItem(it.flipbook_id, { kind: e.target.value })} placeholder="Edition name, e.g. AIF edition" className="sm:col-span-2" />}
                     {it.status === "processing" && <p className="text-xs text-slate-400 sm:col-span-2">Preparing pages {it.pages_done}/{it.page_count || "…"}</p>}
-                    {it.status !== "processing" && (
+                    {it.status === "failed" && <p className="text-xs text-red-400 sm:col-span-2" data-testid={`failed-${it.flipbook_id}`}>{it.error || "This upload didn't finish. Remove it and upload the PDF again."}</p>}
+                    {it.status === "ready" && (
                       <div className="sm:col-span-2 flex flex-wrap gap-2">
                         <Button variant="secondary" size="sm" onClick={() => setDatesFor(it)} data-testid={`dates-${it.flipbook_id}`}><CalendarPlus className="w-4 h-4 mr-1.5" />{datesLabel(it.deadlines)}</Button>
                         <Button variant="secondary" size="sm" disabled={dirty} title={dirty ? "Save changes first" : ""} onClick={() => setEmailFor(it)} data-testid={`email-${it.flipbook_id}`}><Mail className="w-4 h-4 mr-1.5" />Email to subscribers</Button>
