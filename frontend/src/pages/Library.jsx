@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useParams, useSearchParams } from "react-router-dom";
-import { ArrowLeft, BookOpen, Check, Link2, Loader2, Mail, MailPlus, Search, Share2, ThumbsUp, X } from "lucide-react";
+import { AlignLeft, ArrowLeft, BookOpen, Check, ChevronLeft, ChevronRight, Link2, ListTree, Loader2, Mail, MailPlus, Search, SearchCheck, Share2, ThumbsUp, X } from "lucide-react";
 import { toast } from "sonner";
 import { FlipBook } from "../components/viewer/FlipBook";
-import { ViewerToolbar } from "../components/viewer/ViewerToolbar";
+import { ToolbarButton, ViewerToolbar } from "../components/viewer/ViewerToolbar";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "../components/ui/sheet";
 import { API, copyText, errMsg, fileUrl, publicApi, track, visitorId } from "../lib/api";
 import { playFlip } from "../lib/flipSound";
@@ -225,7 +225,7 @@ function HitGroup({ group, lib, terms, onOpen }) {
         </div>
       </header>
       {group.slice(0, 4).map((r) => (
-        <button key={r.page} onClick={() => onOpen(meta, r.page)} className="w-full text-left px-3 py-2.5 hover:bg-white/[0.07] focus-visible:bg-white/[0.07] focus:outline-none transition-colors flex gap-3" data-testid={`search-hit-${r.flipbook_id}-${r.page}`}>
+        <button key={r.page} onClick={() => onOpen(meta, r.page, terms)} className="w-full text-left px-3 py-2.5 hover:bg-white/[0.07] focus-visible:bg-white/[0.07] focus:outline-none transition-colors flex gap-3" data-testid={`search-hit-${r.flipbook_id}-${r.page}`}>
           <span className="lib-cond shrink-0 w-11 text-[12px] text-[color:var(--mist)] pt-0.5">Page {r.page + 1}</span>
           <span className="text-[13.5px] leading-relaxed text-white/80 line-clamp-3">{highlight(r.snippet, terms)}</span>
         </button>
@@ -481,7 +481,7 @@ function SearchPanel({ slug, lib, current, readPage, onOpen, onClose, autoFocus 
                 const meta = lib.items.find((i) => i.flipbook_id === r.flipbook_id) || {};
                 const there = headlineAt(meta, r.page);
                 return (
-                  <button key={r.flipbook_id + r.page} onClick={() => onOpen(meta, r.page)} className="w-full text-left rounded-xl px-2.5 py-2.5 hover:bg-white/[0.07] focus-visible:bg-white/[0.07] focus:outline-none transition-colors flex gap-3 lib-swap" data-testid={`related-${r.flipbook_id}-${r.page}`}>
+                  <button key={r.flipbook_id + r.page} onClick={() => onOpen(meta, r.page, r.terms)} className="w-full text-left rounded-xl px-2.5 py-2.5 hover:bg-white/[0.07] focus-visible:bg-white/[0.07] focus:outline-none transition-colors flex gap-3 lib-swap" data-testid={`related-${r.flipbook_id}-${r.page}`}>
                     <img src={fileUrl(r.thumb)} alt="" className="w-9 shrink-0 self-start rounded-[2px] shadow-md bg-white" />
                     <span className="min-w-0">
                       <span className="block text-[13.5px] font-medium">{issueName(meta)}<span className="lib-cond font-normal text-[12px] text-[color:var(--mist)] ml-2">Page {r.page + 1}</span></span>
@@ -1105,11 +1105,118 @@ function NextPanel({ next, onOpen, onBack, onSubscribe, subscribed }) {
   );
 }
 
-function Reader({ slug, lib, item, items, startPage, embed, onOpen, onBack, onPage, onShown, onSubscribe, subscribed, onShare, channel, sharedHead, onClearShared }) {
+/* ------------------------------------------------------------------ page text, highlights, magnifier */
+const pageCache = new Map();
+function loadPage(slug, fid, page) {
+  const k = `${fid}:${page}`;
+  if (!pageCache.has(k)) pageCache.set(k, publicApi.get(`/public/libraries/${slug}/page`, { params: { flipbook_id: fid, page } }).then((r) => r.data).catch((e) => { pageCache.delete(k); throw e; }));
+  return pageCache.get(k);
+}
+const norm = (w) => w.toLowerCase().replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, "");
+
+// Marks the search terms on the page itself. The marks live inside the page element,
+// so they turn with the page and scale with it.
+function paintHighlights(root, page, data, terms) {
+  const el = root?.querySelector(`[data-testid=flipbook-page-${page}]`);
+  if (!el) return 0;
+  el.querySelector(".fc-hl")?.remove();
+  const want = (terms || []).map(norm).filter((t) => t.length > 1);
+  if (!want.length || !data?.boxes?.length) return 0;
+  const box = document.createElement("div");
+  box.className = "fc-hl";
+  let n = 0;
+  data.words.forEach((w, i) => {
+    const t = norm(w);
+    if (!t || !want.some((q) => t === q || (q.length > 3 && t.startsWith(q)) || (t.length > 3 && q.startsWith(t) && q.length - t.length <= 2))) return;
+    const [x0, y0, x1, y1] = data.boxes[i];
+    const m = document.createElement("span");
+    m.style.cssText = `left:${x0 / 10 - 0.3}%;top:${y0 / 10 - 0.25}%;width:${(x1 - x0) / 10 + 0.6}%;height:${(y1 - y0) / 10 + 0.5}%`;
+    box.appendChild(m);
+    n += 1;
+  });
+  if (n) el.appendChild(box);
+  return n;
+}
+
+function Magnifier({ wrapRef, flipRef, book, page, portrait, moving, zoom }) {
+  const [lens, setLens] = useState(null);
+  const Z = 2.3, R = 130;
+  useEffect(() => {
+    const wrap = wrapRef.current;
+    if (!wrap) return undefined;
+    const move = (e) => {
+      const r = flipRef.current?.rect();
+      if (!r || moving || zoom > 1) { setLens(null); return; }
+      const b = wrap.getBoundingClientRect();
+      const x = e.clientX - b.left, y = e.clientY - b.top;
+      const n = book.pages.length;
+      let pg = null, left = r.left;
+      if (y >= r.top && y <= r.top + r.height) {
+        if (portrait) { if (x >= r.left && x <= r.left + r.pageWidth) pg = page; }
+        else if (x >= r.left && x < r.left + r.pageWidth) { pg = page === 0 ? null : page; }
+        else if (x >= r.left + r.pageWidth && x <= r.left + r.pageWidth * 2) { pg = page === 0 ? 0 : page + 1 < n && !(page === n - 1) ? page + 1 : null; left = r.left + r.pageWidth; }
+      }
+      if (pg == null) { setLens(null); return; }
+      setLens({ x, y, pg, bx: (x - left) * Z - R, by: (y - r.top) * Z - R, bw: r.pageWidth * Z, bh: r.height * Z });
+    };
+    const out = () => setLens(null);
+    wrap.addEventListener("mousemove", move);
+    wrap.addEventListener("mouseleave", out);
+    return () => { wrap.removeEventListener("mousemove", move); wrap.removeEventListener("mouseleave", out); };
+  }, [wrapRef, flipRef, book, page, portrait, moving, zoom]);
+  if (!lens) return null;
+  return (
+    <div className="fc-lens" aria-hidden="true" data-testid="magnifier"
+      style={{ left: lens.x - R, top: lens.y - R, width: R * 2, height: R * 2, backgroundImage: `url(${fileUrl(book.pages[lens.pg])})`, backgroundSize: `${lens.bw}px ${lens.bh}px`, backgroundPosition: `${-lens.bx}px ${-lens.by}px` }} />
+  );
+}
+
+function ReadText({ slug, item, pages, onPrev, onNext, canPrev, canNext, onClose, side }) {
+  const [data, setData] = useState({});
+  useEffect(() => {
+    let live = true;
+    pages.forEach((p) => { if (!data[p]) loadPage(slug, item.flipbook_id, p).then((d) => live && setData((x) => ({ ...x, [p]: d }))).catch(() => live && setData((x) => ({ ...x, [p]: { paras: [] } }))); });
+    return () => { live = false; };
+  }, [slug, item.flipbook_id, pages.join(",")]); // eslint-disable-line react-hooks/exhaustive-deps
+  const skip = /^(monthly communique|page \d+ of \d+|bengaluru?|mumbai|singhvi|dev ?& ?unni|chartered accountants)/i;
+  return (
+    <Sheet open onOpenChange={(o) => !o && onClose()}>
+      <SheetContent side={side} className={`lib bg-[#0f1f33] border-white/10 text-white p-0 ${side === "bottom" ? "h-[88vh]" : "w-full sm:max-w-xl"}`} data-testid="read-text">
+        <div className="h-full flex flex-col">
+          <SheetHeader className="px-6 pt-6 pb-3 border-b border-white/10 text-left">
+            <SheetTitle className="text-white font-normal text-[17px]">{issueName(item)}<span className="lib-cond text-[13px] text-white/50 ml-2">Page {pages.map((p) => p + 1).join(" and ")}</span></SheetTitle>
+          </SheetHeader>
+          <div className="flex-1 min-h-0 overflow-y-auto lib-scroll px-6 py-5">
+            {pages.map((p) => (
+              <article key={p} className="max-w-[62ch] mb-8">
+                {pages.length > 1 && <p className="lib-cond text-[12px] text-[color:var(--mist)] mb-3">Page {p + 1}</p>}
+                {!data[p] ? <p className="text-white/50 flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" />Loading text...</p>
+                  : data[p].paras.filter((t) => !skip.test(t)).length === 0 ? <p className="text-white/50">No text on this page.</p>
+                  : data[p].paras.filter((t) => !skip.test(t)).map((t, i) => {
+                    if (t.startsWith("## ")) return <h3 key={i} className="text-[20px] font-medium text-white mt-6 mb-2 leading-snug">{t.slice(3)}</h3>;
+                    const m = t.match(/^\x01([\s\S]*?)\x02([\s\S]*)$/);
+                    return <p key={i} className="text-[17px] leading-[1.75] text-white/85 mb-4">{m ? <><strong className="font-medium text-white">{m[1]}</strong> {m[2]}</> : t}</p>;
+                  })}
+              </article>
+            ))}
+          </div>
+          <div className="shrink-0 border-t border-white/10 px-4 py-3 flex items-center justify-between">
+            <button onClick={onPrev} disabled={!canPrev} className="h-10 px-4 rounded-full hover:bg-white/10 disabled:opacity-30 flex items-center gap-1.5 text-[14px]"><ChevronLeft className="w-4 h-4" />Previous page</button>
+            <button onClick={onNext} disabled={!canNext} className="h-10 px-4 rounded-full hover:bg-white/10 disabled:opacity-30 flex items-center gap-1.5 text-[14px]" data-testid="read-text-next">Next page<ChevronRight className="w-4 h-4" /></button>
+          </div>
+        </div>
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+function Reader({ slug, lib, item, items, startPage, embed, onOpen, onBack, onPage, onShown, onSubscribe, subscribed, onShare, channel, sharedHead, onClearShared, highlight = null }) {
   const [book, setBook] = useState(null);
   const [page, setPage] = useState(0);
   const [portrait, setPortrait] = useState(false);
   const [zoom, setZoom] = useState(1);
+  const zoomRef = useRef(1);
+  zoomRef.current = zoom;
   const [sound, setSound] = useState(true);
   const [fs, setFs] = useState(false);
   const [thumbs, setThumbs] = useState(false);
@@ -1118,6 +1225,12 @@ function Reader({ slug, lib, item, items, startPage, embed, onOpen, onBack, onPa
   const [contents, setContents] = useState(false);
   const [sheet, setSheet] = useState(null);
   const [moving, setMoving] = useState(false); // a page is being turned or dragged
+  const [readText, setReadText] = useState(false);
+  const [returnTo, setReturnTo] = useState(null); // page to go back to after a jump from Contents
+  const [lensOn, setLensOn] = useState(() => { try { return localStorage.getItem("fc_magnifier") !== "0"; } catch { return true; } });
+  const fine = typeof window !== "undefined" && window.matchMedia?.("(hover: hover) and (pointer: fine)").matches;
+  const wrapRef = useRef(null);
+  const scrollRef = useRef(null);
   const flipRef = useRef(null);
   const rootRef = useRef(null);
   const soundRef = useRef(true);
@@ -1183,6 +1296,30 @@ function Reader({ slug, lib, item, items, startPage, embed, onOpen, onBack, onPa
   }, [measure, announce]);
 
   useEffect(() => { onPage?.(page); }, [page, onPage]);
+  // search terms marked on the pages the reader lands on
+  useEffect(() => {
+    if (!book || !highlight?.terms?.length) return undefined;
+    let live = true;
+    const pgs = [startPage, startPage + 1].filter((p) => p >= 0 && p < book.pages.length);
+    const t = setTimeout(() => pgs.forEach((p) => loadPage(slug, item.flipbook_id, p).then((d) => live && paintHighlights(rootRef.current, p, d, highlight.terms)).catch(() => {})), 500);
+    return () => { live = false; clearTimeout(t); };
+  }, [book, highlight, startPage, slug, item.flipbook_id]);
+  useEffect(() => () => rootRef.current?.querySelectorAll(".fc-hl").forEach((x) => x.remove()), [item.flipbook_id, highlight]);
+  // two-finger pinch zooms the page on touch screens; one finger still turns pages
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return undefined;
+    let d0 = 0, z0 = 1;
+    const dist = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+    const start = (e) => { if (e.touches.length === 2) { d0 = dist(e.touches); z0 = zoomRef.current; e.stopPropagation(); } };
+    const move = (e) => { if (e.touches.length === 2 && d0) { e.preventDefault(); e.stopPropagation(); setZoom(Math.min(3, Math.max(1, Math.round(z0 * (dist(e.touches) / d0) * 20) / 20))); } };
+    const end = (e) => { if (e.touches.length < 2) d0 = 0; };
+    el.addEventListener("touchstart", start, { capture: true, passive: true });
+    el.addEventListener("touchmove", move, { capture: true, passive: false });
+    el.addEventListener("touchend", end, { capture: true });
+    return () => { el.removeEventListener("touchstart", start, { capture: true }); el.removeEventListener("touchmove", move, { capture: true }); el.removeEventListener("touchend", end, { capture: true }); };
+  }, [book]);
+  useEffect(() => { if (returnTo != null && page === returnTo) setReturnTo(null); }, [page, returnTo]);
   const idx = items.findIndex((i) => i.flipbook_id === item.flipbook_id);
   const next = items[idx + 1];
   if (!book) return <div className="h-full grid place-items-center"><Loader2 className="w-7 h-7 animate-spin text-white/40" /></div>;
@@ -1213,9 +1350,10 @@ function Reader({ slug, lib, item, items, startPage, embed, onOpen, onBack, onPa
           </div>
         </div>
       )}
-      <div className={`flex-1 min-h-0 ${zoom > 1 ? "overflow-auto lib-scroll" : "overflow-hidden"} flex`}>
+      <div ref={scrollRef} className={`flex-1 min-h-0 ${zoom > 1 ? "overflow-auto lib-scroll" : "overflow-hidden"} flex`}>
         <div className="m-auto shrink-0 p-3 sm:p-6 relative" style={{ width: `${zoom * 100}%`, height: `${zoom * 100}%` }}>
-          <div className="relative w-full h-full">
+          <div ref={wrapRef} className={`relative w-full h-full ${fine && lensOn && zoom === 1 ? "fc-lens-on" : ""}`}>
+            {fine && lensOn && <Magnifier wrapRef={wrapRef} flipRef={flipRef} book={book} page={page} portrait={portrait} moving={moving} zoom={zoom} />}
             <FlipBook key={book.id} ref={flipRef} book={book} accent="#9db8d4" onFlip={onFlip} onReady={onReady} onTurnStart={onTurnStart} onState={(st) => setMoving(st !== "read")} />
             {/* What sits inside each cover is painted onto the sheet page-flip reveals while a
                 page is lifted, so it is already there mid-turn, then stays put when the turn ends. */}
@@ -1245,8 +1383,8 @@ function Reader({ slug, lib, item, items, startPage, embed, onOpen, onBack, onPa
         </div>
       </div>
       <div className="shrink-0 flex flex-wrap items-center justify-center gap-x-4 gap-y-2 pt-1 pb-2 px-3">
-        {portrait && item.toc?.length > 0 && (
-          <button onClick={() => setContents(true)} className="h-8 px-3.5 rounded-full lib-glass text-[13px] shrink-0" data-testid="reader-contents">Contents</button>
+        {returnTo != null && (
+          <button onClick={() => { goTo(returnTo); setReturnTo(null); }} className="h-8 pl-2.5 pr-3.5 rounded-full lib-glass text-[13px] shrink-0 flex items-center gap-1.5 lib-swap" data-testid="reader-return"><ArrowLeft className="w-3.5 h-3.5" />Back to page {returnTo + 1}</button>
         )}
         <Barcode count={n} active={page} done={seen} onPick={(i) => { const r = flipRef.current?.go(i); if (r != null) setPage(r); setTimeout(measure, 60); }} labels={book.pages.map((_, i) => `Page ${i + 1}`)} height={16} />
         <UsefulButton key={item.flipbook_id} slug={slug} item={item} />
@@ -1259,15 +1397,26 @@ function Reader({ slug, lib, item, items, startPage, embed, onOpen, onBack, onPa
       <div className="shrink-0 flex justify-center pb-4 pt-1">
         <ViewerToolbar label={`${label} / ${n}`} canPrev={page > 0} canNext={page < n - (portrait ? 1 : 2) || (page === 0 && n > 1)} onPrev={() => flipRef.current.prev()} onNext={() => flipRef.current.next()}
           zoom={zoom} onZoom={(d) => setZoom((z) => Math.min(3, Math.max(1, z + d)))} sound={sound} onSound={() => setSound((s) => !s)}
-          fs={fs} onFs={toggleFs} onShare={share} onThumbs={() => setThumbs(true)} embed={false} accent="#204262" />
+          fs={fs} onFs={toggleFs} onShare={share} onThumbs={() => setThumbs(true)} embed={false} accent="#204262"
+          lead={item.toc?.length > 0 ? <><ToolbarButton onClick={() => setContents(true)} testid="reader-contents-btn" title="Contents"><ListTree className="w-4 h-4" /></ToolbarButton><span className="w-px h-5 bg-white/10 mx-1 shrink-0" /></> : null}
+          extras={<>
+            <ToolbarButton onClick={() => setReadText(true)} testid="reader-text-btn" title="Read as text"><AlignLeft className="w-4 h-4" /></ToolbarButton>
+            {fine && <ToolbarButton onClick={() => setLensOn((v) => { try { localStorage.setItem("fc_magnifier", v ? "0" : "1"); } catch { /* private mode */ } return !v; })} testid="reader-lens-btn" title={lensOn ? "Magnifier on: hover over text to enlarge it" : "Magnifier off"}><SearchCheck className="w-4 h-4" style={{ color: lensOn ? "#9db8d4" : undefined }} /></ToolbarButton>}
+          </>} />
       </div>
       <Sheet open={contents} onOpenChange={setContents}>
-        <SheetContent side="bottom" className="lib bg-[#0f1f33] border-white/10 h-[75vh] text-white p-0">
+        <SheetContent side={portrait ? "bottom" : "left"} className={`lib bg-[#0f1f33] border-white/10 text-white p-0 ${portrait ? "h-[75vh]" : "w-full sm:max-w-md"}`} data-testid="contents-sheet">
           <div className="h-full overflow-y-auto lib-scroll px-6 pt-8 pb-6">
-            <IssuePanel item={item} lib={lib} slug={slug} onShareHead={(h) => { setContents(false); shareHead(h); }} onGo={(p) => { const r = flipRef.current?.go(p); if (r != null) setPage(r); setContents(false); }} onStart={() => { flipRef.current?.next(); setContents(false); }} />
+            <IssuePanel item={item} lib={lib} slug={slug} onShareHead={(h) => { setContents(false); shareHead(h); }} onGo={(p) => { if (page > 0) setReturnTo(page); const r = flipRef.current?.go(p); if (r != null) setPage(r); setContents(false); setTimeout(measure, 60); }} onStart={() => { if (page > 0) setReturnTo(page); goTo(1); setContents(false); }} />
           </div>
         </SheetContent>
       </Sheet>
+      {readText && (() => {
+        const vis = portrait ? [page] : page === 0 ? [0] : [page, page + 1].filter((p) => p < n);
+        return <ReadText slug={slug} item={item} pages={vis} side={portrait ? "bottom" : "right"} onClose={() => setReadText(false)}
+          canPrev={page > 0} canNext={vis[vis.length - 1] < n - 1}
+          onPrev={() => { flipRef.current?.prev(); }} onNext={() => { flipRef.current?.next(); }} />;
+      })()}
       <Sheet open={thumbs} onOpenChange={setThumbs}>
         <SheetContent side="bottom" className="bg-[#0f1f33] border-white/10 max-h-[60vh] text-white">
           <SheetHeader><SheetTitle className="text-white font-normal">{item.label}, all pages</SheetTitle></SheetHeader>
@@ -1474,6 +1623,8 @@ export default function Library({ embed = false }) {
   const [params, setParams] = useSearchParams();
   const [lib, setLib] = useState(null);
   const [error, setError] = useState("");
+  const [waking, setWaking] = useState(false);
+  const [hl, setHl] = useState(null); // search terms to mark on the page that opens
   const [focus, setFocus] = useState(null);
   const [open, setOpen] = useState(null);
   const [startPage, setStartPage] = useState(0);
@@ -1499,14 +1650,25 @@ export default function Library({ embed = false }) {
   const browseRef = useRef(null);
 
   useEffect(() => {
-    publicApi.get(`/public/libraries/${slug}`).then((r) => {
+    // The free server sleeps when idle; the first visitor can wait up to a minute while it
+    // wakes. Keep trying, and tell them what's happening, instead of showing an error.
+    let live = true, tries = 0;
+    const slow = setTimeout(() => live && setWaking(true), 2500);
+    const get = () => publicApi.get(`/public/libraries/${slug}`, { timeout: 70000 });
+    const attempt = () => get().catch((e) => {
+      if (!live || e?.response?.status === 404 || ++tries > 4) throw e;
+      return new Promise((r) => setTimeout(r, 4000)).then(attempt);
+    });
+    attempt().finally(() => clearTimeout(slow)).then((r) => {
+      if (!live) return;
       r.data.items = r.data.items.map((i) => (undated(i) && !i.special ? { ...i, special: true, kind: i.kind || "Special edition" } : i));
       setLib(r.data);
       document.title = r.data.title + (r.data.brand.name ? ` | ${r.data.brand.name}` : "");
       const want = params.get("issue");
       const it = r.data.items.find((i) => i.flipbook_id === want);
       if (it) { setOpen(it); setShelf(it.shelf || "monthly"); setStartPage(Math.max(0, (parseInt(params.get("page"), 10) || 1) - 1)); }
-    }).catch(() => setError("This library isn't available. Check the link, or ask the publisher for a new one."));
+    }).catch((e) => live && setError(e?.response?.status === 404 ? "This library isn't available. Check the link, or ask the publisher for a new one." : "The library couldn't be reached. Please check your connection and try again."));
+    return () => { live = false; clearTimeout(slow); };
   }, [slug]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const all = useMemo(() => lib?.items || [], [lib]);
@@ -1588,8 +1750,9 @@ export default function Library({ embed = false }) {
   };
 
   const onFocus = (it) => { clearTimeout(focusTimer.current); focusTimer.current = setTimeout(() => setFocus(it), 90); };
-  const openIssue = (it, page = 0) => {
+  const openIssue = (it, page = 0, terms = null) => {
     setSharedH(null);
+    setHl(Array.isArray(terms) && terms.length ? { fid: it.flipbook_id, page, terms, at: Date.now() } : null);
     if (it.shelf && it.shelf !== curShelf) setShelf(it.shelf);
     setOpen(it); setStartPage(page); setSearchSheet(false); setReadPage(page); setLeaving(false);
     if (spot) { setSpot(null); }
@@ -1649,7 +1812,14 @@ export default function Library({ embed = false }) {
   const back = () => { setOpen(null); setReadPage(null); setAskOpen(false); setLeaving(false); setParams((p) => { p.delete("issue"); p.delete("page"); return p; }, { replace: true }); };
 
   if (error) return <div className="lib min-h-screen grid place-items-center px-6 text-center text-white/70">{error}</div>;
-  if (!lib) return <div className="lib min-h-screen grid place-items-center"><Loader2 className="w-8 h-8 animate-spin text-white/40" /></div>;
+  if (!lib) return (
+    <div className="lib min-h-screen grid place-items-center px-6 text-center" data-testid="library-loading">
+      <div className="flex flex-col items-center">
+        <Barcode count={9} active={4} height={22} className="lib-wake" />
+        {waking && <p className="mt-6 text-[15px] text-white/70 lib-swap">Opening the library. This can take up to a minute the first time.</p>}
+      </div>
+    </div>
+  );
 
   const { brand } = lib;
   const ask = `Ask ${shortName(brand.name) || "the archive"}`;
@@ -1825,7 +1995,7 @@ export default function Library({ embed = false }) {
               <div className="hidden md:block min-h-0 border-r border-white/[0.06]"><DockRail items={items} current={open.flipbook_id} onOpen={openIssue} switcher={switcher("down", "")} /></div>
               <Reader slug={slug} item={open} items={items} startPage={startPage} embed={embed} onOpen={openIssue} onBack={back} onPage={setReadPage}
                 onShown={land} onSubscribe={() => setSubOpen("subscribe")} subscribed={subscribed} onShare={(it, p, head) => setShareOf({ item: it, page: p, head: head || null })}
-                lib={lib} channel={channel} sharedHead={sharedH != null && open ? flatHeads(open)[sharedH] || null : null}
+                lib={lib} channel={channel} highlight={hl && hl.fid === open.flipbook_id ? hl : null} sharedHead={sharedH != null && open ? flatHeads(open)[sharedH] || null : null}
                 onClearShared={() => { setSharedH(null); setParams((p) => { p.delete("h"); p.delete("via"); return p; }, { replace: true }); }} />
             </main>
           )}
@@ -1843,7 +2013,7 @@ export default function Library({ embed = false }) {
       <BrandBars className="hidden md:block absolute right-6 bottom-3 z-20" />
       {lib.show_badge && <PoweredBy slug={slug} className="hidden md:flex absolute right-[188px] bottom-[7px] z-20" />}
 
-      {spot && !open && <Spotlight slug={slug} lib={lib} topics={topics} closing={spot === "closing"} onOpen={(it, p) => openIssue(it, p)} onTopic={pickTopic} onClose={closeSpot} />}
+      {spot && !open && <Spotlight slug={slug} lib={lib} topics={topics} closing={spot === "closing"} onOpen={(it, p, t) => openIssue(it, p, t)} onTopic={pickTopic} onClose={closeSpot} />}
 
       {searchSheet && (
         <div className="xl:hidden fixed inset-0 z-50 bg-[#0a1626]/80 backdrop-blur-sm p-3 sm:p-6 lib-spot-in" role="dialog" aria-modal="true">

@@ -18,6 +18,19 @@ function RequireAuth({ children }) {
   return children;
 }
 
+function NotFound() {
+  return (
+    <div className="min-h-screen bg-[#0a1626] text-white grid place-items-center px-6 text-center" data-testid="not-found">
+      <div>
+        <p className="text-sm text-white/50">Page not found</p>
+        <h1 className="mt-2 text-3xl font-light">This link doesn't lead anywhere.</h1>
+        <p className="mt-3 text-white/60">It may have been mistyped, or the page has moved.</p>
+        <a href="/" className="inline-block mt-6 h-11 leading-[44px] px-6 rounded-full bg-white text-[#0a1626] text-sm font-medium">Go to the home page</a>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   return (
     <AuthProvider>
@@ -34,6 +47,7 @@ function App() {
           <Route path="/embed/library/:slug" element={<Library embed />} />
           <Route path="/view/:id" element={<Viewer />} />
           <Route path="/embed/:id" element={<Viewer embed />} />
+          <Route path="*" element={<NotFound />} />
         </Routes>
         <Toaster position="bottom-right" theme="dark" />
       </BrowserRouter>

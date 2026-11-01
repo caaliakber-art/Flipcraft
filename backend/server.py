@@ -22,6 +22,7 @@ import pymupdf as fitz
 from toc import parse_toc
 import ask as ask_mod
 from covermask import cover_mask
+from readtext import paragraphs
 import bcrypt
 import jwt
 import secrets
@@ -177,6 +178,29 @@ async def store_file(data: bytes, content_type: str, ext: str, folder: str, ohas
     return result["path"]
 
 
+def client_ip(request) -> str:
+    """The visitor's address as Render's edge saw it. The first X-Forwarded-For entry is
+    whatever the browser sent and can be faked, so it is never trusted on its own."""
+    h = request.headers
+    for name in ("cf-connecting-ip", "true-client-ip"):
+        if h.get(name):
+            return h[name].strip()
+    xff = [p.strip() for p in (h.get("x-forwarded-for") or "").split(",") if p.strip()]
+    if xff:
+        return xff[-1]
+    return request.client.host if request.client else ""
+
+
+async def over_limit(key: str, limit: int, window_s: int) -> bool:
+    """Counts hits in MongoDB (survives restarts); old hits expire on their own."""
+    now = datetime.now(timezone.utc)
+    n = await db.hits.count_documents({"k": key, "at": {"$gt": now - timedelta(seconds=window_s)}})
+    if n >= limit:
+        return True
+    await db.hits.insert_one({"k": key, "at": now})
+    return False
+
+
 app = FastAPI()
 api = APIRouter(prefix="/api")
 
@@ -330,6 +354,35 @@ async def convert_job(fid: str, ohash: str):
 INTERRUPTED = "The upload was interrupted before it finished. Please remove it and upload the PDF again."
 
 
+# Page images are 2000 px wide so text stays sharp when readers zoom or use the magnifier.
+RENDER_V = 2
+PAGE_PX = 2000
+
+
+def render_page(page) -> dict:
+    """Image, thumbnail, text, word boxes (for search highlights) and paragraphs (for Read as text)."""
+    zoom = PAGE_PX / max(page.rect.width, 1)
+    img = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False).tobytes("jpeg", jpg_quality=82)
+    tz = 260 / max(page.rect.width, 1)
+    th = page.get_pixmap(matrix=fitz.Matrix(tz, tz), alpha=False).tobytes("jpeg", jpg_quality=70)
+    w, h = max(page.rect.width, 1), max(page.rect.height, 1)
+    words = page.get_text("words")
+    boxes = [[round(x0 / w * 1000), round(y0 / h * 1000), round(x1 / w * 1000), round(y1 / h * 1000)] for x0, y0, x1, y1, *_ in words]
+    try:
+        paras = paragraphs(page)
+    except Exception:
+        paras = [re.sub(r"\s+", " ", page.get_text()).strip()]
+    return {"img": img, "thumb": th, "text": re.sub(r"\s+", " ", page.get_text()).strip(),
+            "words": [x[4] for x in words], "boxes": boxes, "paras": paras}
+
+
+async def save_page_data(fid: str, i: int, page) -> tuple:
+    r = await asyncio.to_thread(render_page, page)
+    await db.pagetext.update_one({"flipbook_id": fid, "page": i}, {"$set": {"text": r["text"][:20000]}}, upsert=True)
+    await db.pagewords.update_one({"flipbook_id": fid, "page": i}, {"$set": {"t": r["words"][:6000], "b": r["boxes"][:6000], "p": r["paras"][:300]}}, upsert=True)
+    return r["img"], r["thumb"]
+
+
 async def _convert(fid: str, path: str, ohash: str, pdf_path: Optional[str] = None):
     try:
         doc = await asyncio.to_thread(fitz.open, path)
@@ -342,13 +395,7 @@ async def _convert(fid: str, path: str, ohash: str, pdf_path: Optional[str] = No
         await db.flipbooks.update_one({"id": fid}, {"$set": {"page_count": count, "page_width": rect.width, "page_height": rect.height, "cover_mask": mask}})
         pages, thumbs = [], []
         for i in range(count):
-            page = doc[i]
-            zoom = 1400 / max(page.rect.width, 1)
-            img = await asyncio.to_thread(lambda: page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False).tobytes("jpeg", jpg_quality=85))
-            tz = 260 / max(page.rect.width, 1)
-            th = await asyncio.to_thread(lambda: page.get_pixmap(matrix=fitz.Matrix(tz, tz), alpha=False).tobytes("jpeg", jpg_quality=70))
-            text = re.sub(r"\s+", " ", page.get_text()).strip()
-            await db.pagetext.update_one({"flipbook_id": fid, "page": i}, {"$set": {"text": text[:20000]}}, upsert=True)
+            img, th = await save_page_data(fid, i, doc[i])
             pages.append(await store_file(img, "image/jpeg", "jpg", f"pages/{fid}", ohash))
             thumbs.append(await store_file(th, "image/jpeg", "jpg", f"pages/{fid}", ohash))
             await db.flipbooks.update_one({"id": fid}, {"$set": {"pages_done": i + 1}})
@@ -359,7 +406,7 @@ async def _convert(fid: str, path: str, ohash: str, pdf_path: Optional[str] = No
         doc.close()
         await db.flipbooks.update_one({"id": fid}, {"$set": {"toc": toc}})
         pdf_path = pdf_path or await store_file(Path(path).read_bytes(), "application/pdf", "pdf", f"pages/{fid}", ohash, private=True)
-        await db.flipbooks.update_one({"id": fid}, {"$set": {"pages": pages, "thumbs": thumbs, "pdf_path": pdf_path, "status": "ready", "updated_at": now_iso()}})
+        await db.flipbooks.update_one({"id": fid}, {"$set": {"pages": pages, "thumbs": thumbs, "pdf_path": pdf_path, "status": "ready", "render_v": RENDER_V, "updated_at": now_iso()}})
         if (await db.flipbooks.find_one({"id": fid}, {"is_deleted": 1})).get("is_deleted"):
             await db.files.update_many({"storage_path": {"$regex": f"^{APP_NAME}/pages/{fid}/"}}, {"$set": {"is_deleted": True}})
     except Exception as e:
@@ -370,6 +417,11 @@ async def _convert(fid: str, path: str, ohash: str, pdf_path: Optional[str] = No
 @api.get("/")
 async def root():
     return {"message": "FlipCraft API"}
+
+
+@api.get("/health")
+async def health():
+    return {"ok": True}
 
 
 @api.post("/auth/signup")
@@ -398,7 +450,10 @@ async def signup(body: SignupIn):
 
 
 @api.post("/auth/login")
-async def login(body: LoginIn):
+async def login(body: LoginIn, request: Request):
+    ip = client_ip(request)
+    if await over_limit(f"login:{ip}", 20, 900) or await over_limit(f"login:{body.email.strip().lower()}", 10, 900):
+        raise HTTPException(status_code=429, detail="Too many sign-in attempts. Please wait 15 minutes and try again.")
     user = await db.users.find_one({"email": body.email.strip().lower()}, {"_id": 0})
     if not user or not bcrypt.checkpw(body.password.encode(), user["password_hash"].encode()):
         raise HTTPException(status_code=401, detail="Email or password is incorrect")
@@ -1392,7 +1447,6 @@ class SubscribeIn(BaseModel):
 
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]{2,}$")
-subscribe_hits: Dict[str, list] = {}
 
 
 @api.post("/public/libraries/{slug}/subscribe")
@@ -1402,12 +1456,8 @@ async def subscribe(slug: str, body: SubscribeIn, request: Request):
         raise HTTPException(status_code=404, detail="Library not found")
     if body.website:
         return {"ok": True}
-    ip = (request.headers.get("x-forwarded-for") or (request.client.host if request.client else "")).split(",")[0].strip()
-    now = datetime.now(timezone.utc).timestamp()
-    hits = [t for t in subscribe_hits.get(ip, []) if now - t < 3600]
-    if len(hits) >= 8:
+    if await over_limit(f"sub:{client_ip(request)}", 8, 3600):
         raise HTTPException(status_code=429, detail="Too many requests. Please try again later.")
-    subscribe_hits[ip] = hits + [now]
     email = body.email.strip().lower()
     if not EMAIL_RE.match(email):
         raise HTTPException(status_code=400, detail="Please enter a valid email address")
@@ -1633,8 +1683,6 @@ class AskIn(BaseModel):
     flipbook_id: str = Field("", max_length=40)
 
 
-ask_hits: Dict[str, list] = {}
-ask_day: Dict[str, int] = {}
 ASK_PER_HOUR = int(os.environ.get("ASK_PER_HOUR", "20"))
 ASK_PER_DAY = int(os.environ.get("ASK_PER_DAY", "400"))  # whole site; keeps the free tier safe
 
@@ -1655,18 +1703,10 @@ async def ask_library(slug: str, body: AskIn, request: Request):
     plan = await workspace_plan(lib["owner_hash"])
     if not plan.get("ai_search") or not ask_mod.key():
         raise HTTPException(status_code=503, detail="Ask isn't switched on for this library.")
-    ip = (request.headers.get("x-forwarded-for") or (request.client.host if request.client else "")).split(",")[0].strip()
-    now = datetime.now(timezone.utc)
-    hits = [t for t in ask_hits.get(ip, []) if now.timestamp() - t < 3600]
-    if len(hits) >= ASK_PER_HOUR:
-        raise HTTPException(status_code=429, detail="You've asked a lot of questions this hour. Please try again a little later.")
-    day = now.strftime("%Y-%m-%d")
-    if ask_day.get(day, 0) >= ASK_PER_DAY:
+    if await over_limit(f"askday:{lib['id']}", ASK_PER_DAY, 86400):
         raise HTTPException(status_code=429, detail="Ask has reached today's limit. Search still works, and you can try again tomorrow.")
-    ask_hits[ip] = hits + [now.timestamp()]
-    if day not in ask_day:
-        ask_day.clear()
-    ask_day[day] = ask_day.get(day, 0) + 1
+    if await over_limit(f"ask:{client_ip(request)}", ASK_PER_HOUR, 3600):
+        raise HTTPException(status_code=429, detail="You've asked a lot of questions this hour. Please try again a little later.")
 
     data = await library_pages(slug)
     if "ask_index" not in data:
@@ -1706,6 +1746,94 @@ async def ask_library(slug: str, body: AskIn, request: Request):
 async def library_questions(lid: str, ohash: str = Depends(require_owner)):
     await owned_library(lid, ohash)
     return await db.asks.find({"library_id": lid}, {"_id": 0}).sort("created_at", -1).to_list(200)
+
+
+@api.get("/public/libraries/{slug}/page")
+async def public_page_data(slug: str, flipbook_id: str, page: int):
+    """Word boxes (for highlighting search terms) and paragraphs (for Read as text)."""
+    lib = await db.libraries.find_one({"slug": slug, "is_deleted": False}, {"_id": 0, "items": 1})
+    if not lib or flipbook_id not in {i["flipbook_id"] for i in lib.get("items", [])}:
+        raise HTTPException(status_code=404, detail="Not found")
+    doc = await db.pagewords.find_one({"flipbook_id": flipbook_id, "page": page}, {"_id": 0, "t": 1, "b": 1, "p": 1})
+    if doc:
+        return {"words": doc.get("t", []), "boxes": doc.get("b", []), "paras": doc.get("p", [])}
+    t = await db.pagetext.find_one({"flipbook_id": flipbook_id, "page": page}, {"_id": 0, "text": 1})
+    return {"words": [], "boxes": [], "paras": [clean_page_text(t["text"])] if t else []}
+
+
+# Re-creating older issues at the sharper size. Run on demand from the dashboard, one issue
+# at a time: each issue costs one download of its PDF, and readers then fetch new images.
+refresh_state: Dict[str, dict] = {}
+
+
+async def refresh_issue(fb: dict) -> None:
+    fid, ohash = fb["id"], fb["owner_hash"]
+    local = CACHE_DIR / f"refresh-{fid}.pdf"
+    try:
+        await asyncio.to_thread(download_to, fb["pdf_path"], local)
+        doc = await asyncio.to_thread(fitz.open, str(local))
+        pages, thumbs = [], []
+        try:
+            for i in range(doc.page_count):
+                img, th = await save_page_data(fid, i, doc[i])
+                pages.append(await store_file(img, "image/jpeg", "jpg", f"pages/{fid}", ohash))
+                thumbs.append(await store_file(th, "image/jpeg", "jpg", f"pages/{fid}", ohash))
+        finally:
+            doc.close()
+        old = [p for p in (fb.get("pages") or []) + (fb.get("thumbs") or []) if p not in pages and p not in thumbs]
+        await db.flipbooks.update_one({"id": fid}, {"$set": {"pages": pages, "thumbs": thumbs, "render_v": RENDER_V, "updated_at": now_iso()}})
+        # old images: deleting is free on Backblaze; readers with the old pages cached just reload
+        for p in old:
+            try:
+                await asyncio.to_thread(store.delete_object, Bucket=S3_BUCKET, Key=p)
+            except Exception:
+                pass
+            await db.files.update_one({"storage_path": p}, {"$set": {"is_deleted": True}})
+    finally:
+        local.unlink(missing_ok=True)
+        fitz.TOOLS.store_shrink(100)
+        gc.collect()
+
+
+async def refresh_job(lid: str, ids: List[str]) -> None:
+    st = refresh_state[lid]
+    for fid in ids:
+        fb = await db.flipbooks.find_one({"id": fid, "is_deleted": False, "status": "ready"}, {"_id": 0})
+        if fb and fb.get("pdf_path") and fb.get("render_v", 1) < RENDER_V:
+            async with convert_lock:
+                try:
+                    await refresh_issue(fb)
+                except Exception as e:
+                    logger.warning("Refresh of %s failed: %s", fid, e)
+                    st["failed"] += 1
+        st["done"] += 1
+        await asyncio.sleep(1)
+    st["running"] = False
+    lib = await db.libraries.find_one({"id": lid}, {"_id": 0, "slug": 1})
+    if lib:
+        search_cache.pop(lib["slug"], None)
+
+
+@api.get("/libraries/{lid}/refresh")
+async def refresh_status(lid: str, ohash: str = Depends(require_owner)):
+    lib = await owned_library(lid, ohash)
+    ids = [i["flipbook_id"] for i in lib.get("items", [])]
+    left = await db.flipbooks.count_documents({"id": {"$in": ids}, "is_deleted": False, "status": "ready", "pdf_path": {"$exists": True}, "render_v": {"$not": {"$gte": RENDER_V}}})
+    return {"pending": left, **refresh_state.get(lid, {"running": False, "done": 0, "total": 0, "failed": 0})}
+
+
+@api.post("/libraries/{lid}/refresh")
+async def refresh_start(lid: str, limit: int = 10, ohash: str = Depends(require_owner)):
+    lib = await owned_library(lid, ohash)
+    if refresh_state.get(lid, {}).get("running"):
+        return await refresh_status(lid, ohash)
+    ids = [i["flipbook_id"] for i in sort_items(lib.get("items", []))]
+    todo = [b["id"] async for b in db.flipbooks.find({"id": {"$in": ids}, "is_deleted": False, "status": "ready", "pdf_path": {"$exists": True}, "render_v": {"$not": {"$gte": RENDER_V}}}, {"_id": 0, "id": 1})]
+    todo = sorted(todo, key=ids.index)[:max(1, min(limit, 40))]  # newest issues first
+    refresh_state[lid] = {"running": bool(todo), "done": 0, "total": len(todo), "failed": 0}
+    if todo:
+        asyncio.create_task(refresh_job(lid, todo))
+    return await refresh_status(lid, ohash)
 
 
 @api.get("/files/{path:path}")
@@ -1784,6 +1912,9 @@ async def startup():
     await db.reactions.create_index([("flipbook_id", 1), ("visitor", 1)], unique=True)
     await db.pagetext.create_index([("flipbook_id", 1), ("page", 1)], unique=True)
     await db.asks.create_index([("library_id", 1), ("created_at", -1)])
+    await db.hits.create_index([("k", 1), ("at", 1)])
+    await db.hits.create_index("at", expireAfterSeconds=90000)
+    await db.pagewords.create_index([("flipbook_id", 1), ("page", 1)], unique=True)
     try:
         await asyncio.to_thread(store.head_bucket, Bucket=S3_BUCKET)
         logger.info(f"Storage ready (bucket: {S3_BUCKET})")

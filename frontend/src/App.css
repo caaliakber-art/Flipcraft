@@ -355,3 +355,16 @@
 .lib-shelfcard-cover img { width: 100%; height: 100%; object-fit: cover; object-position: top; display: block; }
 .lib-shelfcard-text { min-width: 0; }
 @media (prefers-reduced-motion: reduce) { .lib-shelfcard, .lib-shelfsw-btn, .lib-shelfsw-glyph i { transition: none !important; } }
+
+/* search terms marked on the page */
+.fc-hl { position: absolute; inset: 0; pointer-events: none; z-index: 3; }
+.fc-hl span { position: absolute; background: rgba(255, 214, 10, 0.42); mix-blend-mode: multiply; border-radius: 2px; box-shadow: 0 0 0 1px rgba(214, 170, 0, 0.35); animation: fc-hl-in 900ms ease-out both; }
+@keyframes fc-hl-in { 0% { background: rgba(255, 196, 0, 0.9); transform: scale(1.25); } 100% { background: rgba(255, 214, 10, 0.42); transform: none; } }
+/* hover magnifier */
+.fc-lens { position: absolute; z-index: 30; pointer-events: none; border-radius: 999px; background-repeat: no-repeat; background-color: #fff;
+  border: 2px solid rgba(255, 255, 255, 0.9); box-shadow: 0 18px 40px -8px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(10, 22, 38, 0.4); }
+.fc-lens-on { cursor: zoom-in; }
+/* waking-up loader */
+.lib-wake .lib-bar { animation: lib-wake 1.4s ease-in-out infinite alternate; }
+@keyframes lib-wake { from { transform: scaleY(0.45); opacity: 0.5; } to { transform: scaleY(1); opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .fc-hl span, .lib-wake .lib-bar { animation: none; } }

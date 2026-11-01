@@ -1,0 +1,14 @@
+# Render's free plan puts the API to sleep after 15 minutes without visitors; the first
+# reader then waits up to a minute and every cached page image is lost. A light ping
+# every 10 minutes keeps it awake (one always-on service fits in the free 750 hours).
+name: Keep API awake
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - run: curl -fsS --retry 3 --retry-delay 20 --max-time 90 https://flipcraft-api-sg.onrender.com/api/health

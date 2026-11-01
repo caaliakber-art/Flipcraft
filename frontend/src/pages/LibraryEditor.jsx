@@ -16,6 +16,27 @@ const Field = ({ label, children }) => (
   </label>
 );
 
+/* Issues converted before pages were made sharper can be re-created here, ten at a
+   time, so the storage provider's daily download allowance is never strained. */
+function SharpenPages({ id }) {
+  const [st, setSt] = useState(null);
+  const load = useCallback(() => api.get(`/libraries/${id}/refresh`).then((r) => setSt(r.data)).catch(() => {}), [id]);
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => { if (!st?.running) return undefined; const t = setInterval(load, 4000); return () => clearInterval(t); }, [st?.running, load]);
+  if (!st || (!st.pending && !st.running)) return null;
+  const start = async () => { try { const { data } = await api.post(`/libraries/${id}/refresh`, null, { params: { limit: 10 } }); setSt(data); } catch (e) { toast.error(errMsg(e)); } };
+  return (
+    <section className="rounded-xl border border-blue-400/30 bg-blue-400/5 p-4 flex flex-wrap items-center gap-3" data-testid="sharpen-pages">
+      <div className="flex-1 min-w-[220px]">
+        <p className="font-medium text-sm">Sharper pages for older issues</p>
+        <p className="text-xs text-slate-400 mt-0.5">{st.running ? `Re-creating ${st.done} of ${st.total}... Readers can keep reading meanwhile.` : `${st.pending} issue${st.pending === 1 ? "" : "s"} still use the older, softer page images. They're re-created ten at a time; doing a batch a day keeps storage use low.`}</p>
+      </div>
+      {!st.running && <Button size="sm" onClick={start} data-testid="sharpen-start">Re-create {Math.min(10, st.pending)} issue{Math.min(10, st.pending) === 1 ? "" : "s"}</Button>}
+      {st.running && <Loader2 className="w-4 h-4 animate-spin text-slate-400" />}
+    </section>
+  );
+}
+
 const SHELF_OPTS = [["monthly", "Monthly Communique"], ["special", "Special Communiques"], ["articles", "Articles"], ["presentations", "Presentations & Budget"]];
 const shelfOf = (i) => i.shelf || (i.special ? "special" : "monthly");
 
@@ -150,6 +171,8 @@ export default function LibraryEditor() {
               </ul>
             )}
           </section>
+
+          <SharpenPages id={id} />
 
           <section className="space-y-3">
             <div className="flex items-center gap-3">
