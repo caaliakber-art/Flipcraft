@@ -1,12 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useParams, useSearchParams } from "react-router-dom";
-import { AlignLeft, ArrowLeft, BookOpen, Check, ChevronLeft, ChevronRight, Link2, ListTree, Loader2, Mail, MailPlus, Search, SearchCheck, Share2, ThumbsUp, X } from "lucide-react";
+import { AlignLeft, ArrowLeft, Headphones, Pause, Play, BookOpen, Check, ChevronLeft, ChevronRight, Download, Link2, ListTree, Loader2, Lock, Mail, MailPlus, Search, SearchCheck, Share2, ThumbsUp, X } from "lucide-react";
 import { toast } from "sonner";
 import { FlipBook } from "../components/viewer/FlipBook";
 import { ToolbarButton, ViewerToolbar } from "../components/viewer/ViewerToolbar";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "../components/ui/sheet";
-import { API, copyText, errMsg, fileUrl, publicApi, track, visitorId } from "../lib/api";
+import { API, copyText, errMsg, fileUrl, getReaderToken, publicApi, setReaderToken, track, visitorId } from "../lib/api";
 import { playFlip } from "../lib/flipSound";
 
 const reduceMotion = () => typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
@@ -35,6 +35,50 @@ function downloadIcs(events, filename, link) {
   a.download = filename;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+// Calendar links that open the reader's own calendar with the event filled in, instead of
+// downloading a file. The .ics file stays as the option for Apple Calendar and others.
+const ymd = (iso, plus = 0) => { const d = new Date(iso + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() + plus); return d.toISOString().slice(0, 10); };
+const googleCal = (e) => `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(e.title)}&dates=${ymd(e.date).replace(/-/g, "")}/${ymd(e.date, 1).replace(/-/g, "")}&details=${encodeURIComponent(e.note || "")}`;
+const outlookCal = (e, office) => `https://outlook.${office ? "office" : "live"}.com/calendar/0/deeplink/compose?path=%2Fcalendar%2Faction%2Fcompose&rru=addevent&allday=true&subject=${encodeURIComponent(e.title)}&startdt=${ymd(e.date)}&enddt=${ymd(e.date, 1)}&body=${encodeURIComponent(e.note || "")}`;
+const isApple = () => /iPhone|iPad|iPod|Macintosh/.test(navigator.userAgent);
+
+function CalendarMenu({ events, label, file, link, className = "", testid }) {
+  const [open, setOpen] = useState(null); // where to draw the menu, or null
+  const ref = useRef(null);
+  const menu = useRef(null);
+  useEffect(() => {
+    if (!open) return undefined;
+    const away = (e) => { if (!ref.current?.contains(e.target) && !menu.current?.contains(e.target)) setOpen(null); };
+    const close = () => setOpen(null);
+    document.addEventListener("pointerdown", away); window.addEventListener("resize", close); document.addEventListener("scroll", close, true);
+    return () => { document.removeEventListener("pointerdown", away); window.removeEventListener("resize", close); document.removeEventListener("scroll", close, true); };
+  }, [open]);
+  const toggle = () => {
+    if (open) return setOpen(null);
+    const r = ref.current.getBoundingClientRect();
+    const h = 190, w = 240;
+    const up = r.bottom + h > window.innerHeight - 8;
+    setOpen({ left: Math.max(8, Math.min(window.innerWidth - w - 8, r.right - w)), top: up ? r.top - h - 6 : r.bottom + 6 });
+  };
+  const one = events.length === 1 ? events[0] : null;
+  const opts = [
+    ...(one ? [["Google Calendar", googleCal(one)], ["Outlook (work or school)", outlookCal(one, true)], ["Outlook.com", outlookCal(one, false)]] : []),
+    [isApple() ? "Apple Calendar" : one ? "Apple or other calendar (file)" : "Calendar file, all dates", null],
+  ];
+  return (
+    <span ref={ref} className="relative inline-block">
+      <button onClick={toggle} aria-expanded={!!open} className={className} data-testid={testid}>{label}</button>
+      {open && createPortal(
+        <span ref={menu} className="lib fixed z-[80] w-60 rounded-xl lib-solid p-1.5 block text-white" style={{ left: open.left, top: open.top, background: undefined }} role="menu" data-testid="cal-menu">
+          {opts.map(([name, href]) => href ? (
+            <a key={name} href={href} target="_blank" rel="noopener noreferrer" onClick={() => setOpen(null)} role="menuitem" className="block px-3 py-2 rounded-lg text-[13.5px] text-white/85 hover:bg-white/10">{name}</a>
+          ) : (
+            <button key={name} onClick={() => { downloadIcs(events, file, link); setOpen(null); }} role="menuitem" className="w-full text-left px-3 py-2 rounded-lg text-[13.5px] text-white/85 hover:bg-white/10">{name}</button>
+          ))}
+        </span>, document.body)}
+    </span>
+  );
 }
 // where this visit came from: our share buttons tag links with ?via=, otherwise the referring site
 function channelOf(via, embed) {
@@ -129,7 +173,7 @@ function Cover({ src, aspect = 0.707, width, reflect = false, reflectClass = "",
   );
 }
 
-function ShelfCard({ item, onFocus, onOpen, focused, stacked = false }) {
+function ShelfCard({ item, onFocus, onOpen, focused, stacked = false, locked = false }) {
   const { target, bind } = useTilt(12);
   const special = item.special;
   return (
@@ -145,6 +189,7 @@ function ShelfCard({ item, onFocus, onOpen, focused, stacked = false }) {
       data-testid={`shelf-${item.flipbook_id}`}
     >
       <Cover src={item.thumb || item.cover} aspect={item.aspect} width="100%" coverRef={target} reflect={!stacked} reflectClass="lib-reflect-sm" />
+      {locked && !stacked && <span className="absolute z-[2] top-2 right-2 w-7 h-7 rounded-full bg-[#0a1626]/85 border border-white/20 grid place-items-center" title="Free with your email" aria-label="Free with your email"><Lock className="w-3.5 h-3.5 text-white/85" /></span>}
       <div className={`relative z-[1] pt-3 pr-2 transition-opacity duration-300 ${stacked ? "opacity-0" : "opacity-100"}`}>
         <div className={`text-[15px] leading-tight ${focused ? "text-white" : "text-white/75"} transition-colors`}>{special ? item.kind : monthOf(item)}</div>
         <div className="lib-cond text-[12px] text-white/45 mt-0.5 line-clamp-2">{special ? item.label : `${item.page_count} pages`}</div>
@@ -585,6 +630,97 @@ function Spotlight({ slug, lib, topics, closing, onOpen, onTopic, onClose }) {
   );
 }
 
+/* ------------------------------------------------------------------ audio briefing player
+   A slim bar at the bottom: play, progress, and chapters that jump to their page. */
+const clock = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+function AudioBar({ item, autoplay, onChapter, onClose }) {
+  const ref = useRef(null);
+  const [t, setT] = useState(0);
+  const [playing, setPlaying] = useState(false);
+  const [list, setList] = useState(false);
+  const a = item.audio;
+  const chapters = a.chapters || [];
+  const cur = chapters.reduce((k, c, i) => (t >= c.start ? i : k), 0);
+  useEffect(() => { if (autoplay) ref.current?.play().catch(() => {}); }, [autoplay]);
+  const seek = (s) => { if (ref.current) { ref.current.currentTime = s; ref.current.play().catch(() => {}); } };
+  return (
+    <div className="fixed z-[60] inset-x-0 mx-auto bottom-3 w-[min(640px,calc(100vw-16px))] lib-swap" data-testid="audio-bar">
+      {list && (
+        <div className="lib-solid rounded-2xl p-2 mb-2 max-h-[45vh] overflow-y-auto lib-scroll">
+          {chapters.map((c, i) => (
+            <button key={i} onClick={() => { seek(c.start); onChapter?.(c.page); }} className={`w-full text-left px-3 py-2 rounded-lg flex items-center gap-3 text-[14px] hover:bg-white/10 ${i === cur ? "text-white" : "text-white/70"}`}>
+              <span className="lib-cond text-[12px] w-10 shrink-0 text-white/45">{clock(c.start)}</span><span className="flex-1">{c.title}</span><span className="lib-cond text-[12px] text-white/40">p{c.page + 1}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="lib-solid rounded-full pl-2 pr-3 h-14 flex items-center gap-3 shadow-2xl">
+        <button onClick={() => (playing ? ref.current?.pause() : ref.current?.play())} className="w-10 h-10 rounded-full bg-white text-[color:var(--ink)] grid place-items-center shrink-0" aria-label={playing ? "Pause" : "Play"} data-testid="audio-play">
+          {playing ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 ml-0.5" />}
+        </button>
+        <button onClick={() => setList((v) => !v)} className="min-w-0 flex-1 text-left" aria-expanded={list} title="Chapters">
+          <span className="block text-[13.5px] truncate">{chapters[cur]?.title || "Audio briefing"}</span>
+          <span className="block h-1 mt-1.5 rounded bg-white/10 overflow-hidden"><span className="block h-full bg-[color:var(--mist)]" style={{ width: `${(t / Math.max(a.duration || 1, 1)) * 100}%` }} /></span>
+        </button>
+        <span className="lib-cond text-[12px] text-white/50 shrink-0 tabular-nums">{clock(t)} / {clock(a.duration || 0)}</span>
+        <button onClick={() => { ref.current?.pause(); onClose(); }} className="w-8 h-8 grid place-items-center rounded-full hover:bg-white/10 shrink-0" aria-label="Close player"><X className="w-4 h-4" /></button>
+        <audio ref={ref} src={fileUrl(a.path)} preload="none" onTimeUpdate={(e) => setT(e.currentTarget.currentTime)} onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} onEnded={() => setPlaying(false)} />
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ archive gate
+   The latest issue is open to all. Older ones ask for a name and email once, so the
+   firm knows who reads its archive; no password, no confirmation email. */
+const READER_KEY = (slug) => `flipcraft_reader_${slug}`;
+function readReader(slug) { try { return JSON.parse(localStorage.getItem(READER_KEY(slug)) || "null"); } catch { return null; } }
+
+function GateDialog({ slug, lib, item, onClose, onDone }) {
+  const brand = shortName(lib.brand?.name) || lib.brand?.name || "us";
+  const [f, setF] = useState({ name: "", email: "", organisation: "", website: "" });
+  const [news, setNews] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  useEffect(() => { const k = (e) => e.key === "Escape" && onClose(); window.addEventListener("keydown", k); return () => window.removeEventListener("keydown", k); }, [onClose]);
+  const submit = async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      const { data } = await publicApi.post(`/public/libraries/${slug}/reader`, { ...f, newsletter: news });
+      const r = { token: data.token, name: data.name };
+      try { localStorage.setItem(READER_KEY(slug), JSON.stringify(r)); if (news) localStorage.setItem(SUB_KEY(slug), "1"); } catch { /* private mode */ }
+      onDone(r, news);
+    } catch (err) { toast.error(errMsg(err)); setBusy(false); }
+  };
+  const field = "w-full h-11 rounded-xl bg-black/25 border border-white/15 px-3.5 text-[15px] placeholder:text-white/35 focus:outline-none focus:border-[color:var(--mist)] transition-colors";
+  return (
+    <div className="absolute inset-0 z-50 grid place-items-center p-3 sm:p-6 lib-spot-in" role="dialog" aria-modal="true" aria-label="Read older issues" data-testid="gate-dialog">
+      <button className="absolute inset-0 w-full h-full bg-[#081320]/80 backdrop-blur-sm cursor-default" onClick={onClose} aria-label="Close" tabIndex={-1} />
+      <form onSubmit={submit} className="lib-solid lib-spot relative w-[min(520px,100%)] max-h-full overflow-y-auto lib-scroll rounded-3xl p-6 sm:p-8 space-y-4">
+        <button type="button" onClick={onClose} className="absolute right-4 top-4 w-9 h-9 grid place-items-center rounded-full hover:bg-white/10" aria-label="Close"><X className="w-4 h-4" /></button>
+        <div className="flex items-center gap-4">
+          {item?.thumb && <img src={fileUrl(item.thumb)} alt="" className="w-14 rounded-[3px] shadow-xl shrink-0" />}
+          <div>
+            <p className="lib-cond text-[13px] text-[color:var(--mist)]">{issueName(item)}</p>
+            <h2 className="text-[26px] font-light leading-tight tracking-[-0.01em]">Read the full archive</h2>
+          </div>
+        </div>
+        <p className="text-[14.5px] text-white/65 leading-relaxed">The latest issue is open to everyone. Older issues are free too: tell us who you are once and this browser remembers you. You'll also be able to download the PDFs.</p>
+        <div className="grid sm:grid-cols-2 gap-3">
+          <input required value={f.name} onChange={set("name")} placeholder="Your name" autoComplete="name" className={field} data-testid="gate-name" />
+          <input required type="email" value={f.email} onChange={set("email")} placeholder="Work email" autoComplete="email" className={field} data-testid="gate-email" />
+        </div>
+        <input value={f.organisation} onChange={set("organisation")} placeholder="Organisation (optional)" autoComplete="organization" className={field} />
+        <input value={f.website} onChange={set("website")} tabIndex={-1} autoComplete="off" aria-hidden="true" className="hidden" />
+        <label className="flex items-center gap-2.5 text-[14px] text-white/80 cursor-pointer"><input type="checkbox" checked={news} onChange={(e) => setNews(e.target.checked)} className="w-4 h-4 accent-[#9db8d4]" />Also send me each new issue by email</label>
+        <button disabled={busy} className="w-full h-12 rounded-full bg-white text-[color:var(--ink)] text-[15px] font-medium disabled:opacity-60 flex items-center justify-center gap-2" data-testid="gate-submit">{busy && <Loader2 className="w-4 h-4 animate-spin" />}Open the issue</button>
+        <p className="text-[12px] text-white/45 leading-relaxed">{brand} sees which issues you read and may contact you about related topics. Nothing is shared outside {brand}.</p>
+      </form>
+    </div>
+  );
+}
+
 /* ------------------------------------------------------------------ subscribe */
 const SUB_KEY = (slug) => `flipcraft_sub_${slug}`;
 function readSubscribed(slug) { try { return localStorage.getItem(SUB_KEY(slug)) === "1"; } catch { return false; } }
@@ -1021,14 +1157,14 @@ function DatesToAct({ lib, item, slug, compact = false, max = 6 }) {
     <div className={compact ? "" : "rounded-2xl bg-white/[0.06] border border-white/10 p-4"} data-testid="dates-to-act">
       <div className="flex items-center justify-between gap-3 mb-2">
         <p className="lib-cond uppercase tracking-[0.14em] text-[11.5px] text-[color:var(--mist)]">Dates to act on</p>
-        {list.length > 1 && !compact && <button onClick={() => downloadIcs(list.map((d) => ({ ...d, note })), file("dates"), link)} className="lib-cond text-[12px] text-white/60 hover:text-white">Add all to calendar</button>}
+        {list.length > 1 && !compact && <CalendarMenu events={list.map((d) => ({ ...d, note }))} file={file("dates")} link={link} label="Add all to calendar" className="lib-cond text-[12px] text-white/60 hover:text-white" />}
       </div>
       <ul className="space-y-1.5">
         {list.map((d, i) => (
           <li key={i} className="flex items-start gap-3 text-[13.5px] leading-snug">
             <span className="lib-cond shrink-0 w-[84px] text-white">{fmtDate(d.date)}</span>
             <span className="flex-1 text-white/75">{d.title}</span>
-            <button onClick={() => downloadIcs([{ ...d, note }], file(d.date), link)} className="shrink-0 text-[12px] text-[color:var(--mist)] hover:text-white" aria-label={`Add ${d.title} on ${fmtDate(d.date)} to calendar`} title="Add to calendar">+ Calendar</button>
+            <CalendarMenu events={[{ ...d, note }]} file={file(d.date)} link={link} label="+ Calendar" testid={`cal-${i}`} className="shrink-0 text-[12px] text-[color:var(--mist)] hover:text-white" />
           </li>
         ))}
       </ul>
@@ -1140,7 +1276,7 @@ function paintHighlights(root, page, data, terms) {
 
 function Magnifier({ wrapRef, flipRef, book, page, portrait, moving, zoom }) {
   const [lens, setLens] = useState(null);
-  const Z = 2.3, R = 130;
+  const Z = 1.9, H = 150; // a reading band: the page's own width, a few lines tall
   useEffect(() => {
     const wrap = wrapRef.current;
     if (!wrap) return undefined;
@@ -1152,12 +1288,16 @@ function Magnifier({ wrapRef, flipRef, book, page, portrait, moving, zoom }) {
       const n = book.pages.length;
       let pg = null, left = r.left;
       if (y >= r.top && y <= r.top + r.height) {
-        if (portrait) { if (x >= r.left && x <= r.left + r.pageWidth) pg = page; }
+        if (portrait) { if (x >= r.left && x <= r.left + r.pageWidth && page > 0) pg = page; }
         else if (x >= r.left && x < r.left + r.pageWidth) { pg = page === 0 ? null : page; }
-        else if (x >= r.left + r.pageWidth && x <= r.left + r.pageWidth * 2) { pg = page === 0 ? 0 : page + 1 < n && !(page === n - 1) ? page + 1 : null; left = r.left + r.pageWidth; }
+        else if (x >= r.left + r.pageWidth && x <= r.left + r.pageWidth * 2) { pg = page === 0 ? null : page + 1 < n && !(page === n - 1) ? page + 1 : null; left = r.left + r.pageWidth; }
       }
       if (pg == null) { setLens(null); return; }
-      setLens({ x, y, pg, bx: (x - left) * Z - R, by: (y - r.top) * Z - R, bw: r.pageWidth * Z, bh: r.height * Z });
+      const pw = r.pageWidth, bw = pw * Z;
+      // follow the pointer across the line, but never show past the page's edges
+      const bx = Math.min(bw - pw, Math.max(0, (x - left) * Z - pw / 2));
+      const top = Math.min(r.top + r.height - H, Math.max(r.top, y - H / 2));
+      setLens({ left, top, w: pw, pg, bx, by: (y - r.top) * Z - H / 2, bw, bh: r.height * Z });
     };
     const out = () => setLens(null);
     wrap.addEventListener("mousemove", move);
@@ -1167,7 +1307,7 @@ function Magnifier({ wrapRef, flipRef, book, page, portrait, moving, zoom }) {
   if (!lens) return null;
   return (
     <div className="fc-lens" aria-hidden="true" data-testid="magnifier"
-      style={{ left: lens.x - R, top: lens.y - R, width: R * 2, height: R * 2, backgroundImage: `url(${fileUrl(book.pages[lens.pg])})`, backgroundSize: `${lens.bw}px ${lens.bh}px`, backgroundPosition: `${-lens.bx}px ${-lens.by}px` }} />
+      style={{ left: lens.left, top: lens.top, width: lens.w, height: H, backgroundImage: `url(${fileUrl(book.pages[lens.pg])})`, backgroundSize: `${lens.bw}px ${lens.bh}px`, backgroundPosition: `${-lens.bx}px ${-lens.by}px` }} />
   );
 }
 
@@ -1210,7 +1350,7 @@ function ReadText({ slug, item, pages, onPrev, onNext, canPrev, canNext, onClose
   );
 }
 
-function Reader({ slug, lib, item, items, startPage, embed, onOpen, onBack, onPage, onShown, onSubscribe, subscribed, onShare, channel, sharedHead, onClearShared, highlight = null }) {
+function Reader({ slug, lib, item, items, startPage, embed, onOpen, onBack, onPage, onShown, onSubscribe, subscribed, onShare, channel, sharedHead, onClearShared, highlight = null, reader = null, onNeedReader, onListen }) {
   const [book, setBook] = useState(null);
   const [page, setPage] = useState(0);
   const [portrait, setPortrait] = useState(false);
@@ -1227,7 +1367,7 @@ function Reader({ slug, lib, item, items, startPage, embed, onOpen, onBack, onPa
   const [moving, setMoving] = useState(false); // a page is being turned or dragged
   const [readText, setReadText] = useState(false);
   const [returnTo, setReturnTo] = useState(null); // page to go back to after a jump from Contents
-  const [lensOn, setLensOn] = useState(() => { try { return localStorage.getItem("fc_magnifier") !== "0"; } catch { return true; } });
+  const [lensOn, setLensOn] = useState(() => { try { return localStorage.getItem("fc_magnifier2") === "1"; } catch { return false; } });
   const fine = typeof window !== "undefined" && window.matchMedia?.("(hover: hover) and (pointer: fine)").matches;
   const wrapRef = useRef(null);
   const scrollRef = useRef(null);
@@ -1257,7 +1397,13 @@ function Reader({ slug, lib, item, items, startPage, embed, onOpen, onBack, onPa
 
   const measure = useCallback(() => { const r = flipRef.current?.rect(); setRect(r ? { ...r } : null); setPortrait(flipRef.current?.orientation() === "portrait"); }, []);
   useEffect(() => {
-    const k = (e) => { if (/INPUT|TEXTAREA/.test(e.target.tagName)) return; if (e.key === "ArrowRight") flipRef.current?.next(); if (e.key === "ArrowLeft") flipRef.current?.prev(); };
+    const k = (e) => {
+      if (/INPUT|TEXTAREA/.test(e.target.tagName)) return;
+      if (e.key === "ArrowRight") flipRef.current?.next();
+      if (e.key === "ArrowLeft") flipRef.current?.prev();
+      if ((e.key === "c" || e.key === "C") && !e.metaKey && !e.ctrlKey) setContents(true);
+      if (e.key === "Escape" && zoomRef.current > 1) setZoom(1);
+    };
     const f = () => setFs(!!document.fullscreenElement);
     const r = () => setTimeout(() => { flipRef.current?.update(); measure(); }, 80);
     const live = () => { flipRef.current?.update(); measure(); };
@@ -1320,6 +1466,34 @@ function Reader({ slug, lib, item, items, startPage, embed, onOpen, onBack, onPa
     return () => { el.removeEventListener("touchstart", start, { capture: true }); el.removeEventListener("touchmove", move, { capture: true }); el.removeEventListener("touchend", end, { capture: true }); };
   }, [book]);
   useEffect(() => { if (returnTo != null && page === returnTo) setReturnTo(null); }, [page, returnTo]);
+  // Laptop trackpad pinch (and Ctrl + scroll wheel) zooms the book, keeping the spot under
+  // the pointer in place, instead of zooming the whole web page.
+  const anchor = useRef(null);
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return undefined;
+    const wheel = (e) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      const z = zoomRef.current;
+      const d = Math.max(-50, Math.min(50, e.deltaY)); // trackpads send small steps, mouse wheels big ones
+      const next = Math.min(3, Math.max(1, Math.round(z * Math.exp(-d * 0.006) * 100) / 100));
+      if (next === z) return;
+      const b = el.getBoundingClientRect();
+      const cx = e.clientX - b.left, cy = e.clientY - b.top;
+      anchor.current = { fx: (el.scrollLeft + cx) / Math.max(el.scrollWidth, 1), fy: (el.scrollTop + cy) / Math.max(el.scrollHeight, 1), cx, cy };
+      setZoom(next);
+    };
+    el.addEventListener("wheel", wheel, { passive: false });
+    return () => el.removeEventListener("wheel", wheel);
+  }, [book]);
+  useLayoutEffect(() => {
+    const el = scrollRef.current, a = anchor.current;
+    if (!el || !a) return;
+    anchor.current = null;
+    el.scrollLeft = a.fx * el.scrollWidth - a.cx;
+    el.scrollTop = a.fy * el.scrollHeight - a.cy;
+  }, [zoom]);
   const idx = items.findIndex((i) => i.flipbook_id === item.flipbook_id);
   const next = items[idx + 1];
   if (!book) return <div className="h-full grid place-items-center"><Loader2 className="w-7 h-7 animate-spin text-white/40" /></div>;
@@ -1339,7 +1513,7 @@ function Reader({ slug, lib, item, items, startPage, embed, onOpen, onBack, onPa
   return (
     <div ref={rootRef} className="h-full flex flex-col min-h-0 relative" data-testid="library-reader">
       {sharedHead && (
-        <div className="absolute z-20 left-1/2 -translate-x-1/2 top-2 w-[min(640px,calc(100%-24px))] lib-swap" data-testid="shared-banner">
+        <div className="absolute z-20 inset-x-0 mx-auto top-2 w-[min(640px,calc(100%-24px))] lib-swap" data-testid="shared-banner">
           <div className="lib-glass bg-[#0f1f33]/90 rounded-2xl pl-4 pr-2 py-2.5 flex items-center gap-3 shadow-2xl">
             <div className="min-w-0 flex-1">
               <p className="lib-cond text-[11.5px] uppercase tracking-[0.14em] text-[color:var(--mist)]">Shared with you</p>
@@ -1349,6 +1523,13 @@ function Reader({ slug, lib, item, items, startPage, embed, onOpen, onBack, onPa
             <button onClick={onClearShared} className="shrink-0 w-8 h-8 grid place-items-center rounded-full hover:bg-white/10 text-white/60" aria-label="Dismiss"><X className="w-4 h-4" /></button>
           </div>
         </div>
+      )}
+      {zoom > 1 && (
+        <div className="absolute z-20 inset-x-0 top-2 flex justify-center pointer-events-none lib-swap"><div className="pointer-events-auto">
+          <button onClick={() => setZoom(1)} className="h-9 pl-3 pr-4 rounded-full bg-[#0f1f33]/95 border border-white/15 shadow-2xl text-[13.5px] flex items-center gap-2 hover:bg-[#17304c]" data-testid="zoom-reset">
+            <X className="w-4 h-4" />Back to full page<span className="lib-cond text-[11px] text-white/45 ml-1">{Math.round(zoom * 100)}% · Esc</span>
+          </button>
+        </div></div>
       )}
       <div ref={scrollRef} className={`flex-1 min-h-0 ${zoom > 1 ? "overflow-auto lib-scroll" : "overflow-hidden"} flex`}>
         <div className="m-auto shrink-0 p-3 sm:p-6 relative" style={{ width: `${zoom * 100}%`, height: `${zoom * 100}%` }}>
@@ -1398,10 +1579,15 @@ function Reader({ slug, lib, item, items, startPage, embed, onOpen, onBack, onPa
         <ViewerToolbar label={`${label} / ${n}`} canPrev={page > 0} canNext={page < n - (portrait ? 1 : 2) || (page === 0 && n > 1)} onPrev={() => flipRef.current.prev()} onNext={() => flipRef.current.next()}
           zoom={zoom} onZoom={(d) => setZoom((z) => Math.min(3, Math.max(1, z + d)))} sound={sound} onSound={() => setSound((s) => !s)}
           fs={fs} onFs={toggleFs} onShare={share} onThumbs={() => setThumbs(true)} embed={false} accent="#204262"
-          lead={item.toc?.length > 0 ? <><ToolbarButton onClick={() => setContents(true)} testid="reader-contents-btn" title="Contents"><ListTree className="w-4 h-4" /></ToolbarButton><span className="w-px h-5 bg-white/10 mx-1 shrink-0" /></> : null}
+          lead={item.toc?.length > 0 ? <><button onClick={() => setContents(true)} data-testid="reader-contents-btn" title="Contents (C)" className="shrink-0 h-9 pl-3 pr-3.5 rounded-full bg-white/10 hover:bg-white/20 text-slate-100 text-[13.5px] flex items-center gap-2 transition-colors"><ListTree className="w-4 h-4" />Contents</button><span className="w-px h-5 bg-white/10 mx-1 shrink-0" /></> : null}
           extras={<>
+            {item.audio && <ToolbarButton onClick={() => onListen?.(item)} testid="reader-listen-btn" title={`Listen to the ${Math.max(1, Math.round(item.audio.duration / 60))}-minute audio briefing`}><Headphones className="w-4 h-4" /></ToolbarButton>}
             <ToolbarButton onClick={() => setReadText(true)} testid="reader-text-btn" title="Read as text"><AlignLeft className="w-4 h-4" /></ToolbarButton>
-            {fine && <ToolbarButton onClick={() => setLensOn((v) => { try { localStorage.setItem("fc_magnifier", v ? "0" : "1"); } catch { /* private mode */ } return !v; })} testid="reader-lens-btn" title={lensOn ? "Magnifier on: hover over text to enlarge it" : "Magnifier off"}><SearchCheck className="w-4 h-4" style={{ color: lensOn ? "#9db8d4" : undefined }} /></ToolbarButton>}
+            <ToolbarButton testid="reader-download-btn" title={reader ? "Download PDF" : "Download PDF (free with your email)"} onClick={() => {
+              const go = (r) => { const a = document.createElement("a"); a.href = `${API}/public/libraries/${slug}/pdf/${item.flipbook_id}?t=${encodeURIComponent(r.token)}`; a.rel = "noopener"; document.body.appendChild(a); a.click(); a.remove(); };
+              if (reader) go(reader); else onNeedReader?.(go);
+            }}><Download className="w-4 h-4" /></ToolbarButton>
+            {fine && <ToolbarButton onClick={() => setLensOn((v) => { try { localStorage.setItem("fc_magnifier2", v ? "0" : "1"); } catch { /* private mode */ } return !v; })} testid="reader-lens-btn" title={lensOn ? "Reading magnifier on: move over the text to enlarge it. Click to turn off" : "Reading magnifier: enlarge the line under the pointer"}><SearchCheck className="w-4 h-4" style={{ color: lensOn ? "#9db8d4" : undefined }} /></ToolbarButton>}
           </>} />
       </div>
       <Sheet open={contents} onOpenChange={setContents}>
@@ -1625,6 +1811,9 @@ export default function Library({ embed = false }) {
   const [error, setError] = useState("");
   const [waking, setWaking] = useState(false);
   const [hl, setHl] = useState(null); // search terms to mark on the page that opens
+  const [reader, setReader] = useState(() => { const r = readReader(slug); setReaderToken(r?.token); return r; });
+  const [gate, setGate] = useState(null); // { it, page, terms, then } waiting for name and email
+  const [listen, setListen] = useState(null); // { it, autoplay }
   const [focus, setFocus] = useState(null);
   const [open, setOpen] = useState(null);
   const [startPage, setStartPage] = useState(0);
@@ -1666,7 +1855,9 @@ export default function Library({ embed = false }) {
       document.title = r.data.title + (r.data.brand.name ? ` | ${r.data.brand.name}` : "");
       const want = params.get("issue");
       const it = r.data.items.find((i) => i.flipbook_id === want);
-      if (it) { setOpen(it); setShelf(it.shelf || "monthly"); setStartPage(Math.max(0, (parseInt(params.get("page"), 10) || 1) - 1)); }
+      if (it && r.data.archive_gate && it.flipbook_id !== r.data.public_fid && !getReaderToken()) {
+        setGate({ it, page: Math.max(0, (parseInt(params.get("page"), 10) || 1) - 1) });
+      } else if (it) { if (params.get("listen") && it.audio) setListen({ it, autoplay: false }); setOpen(it); setShelf(it.shelf || "monthly"); setStartPage(Math.max(0, (parseInt(params.get("page"), 10) || 1) - 1)); }
     }).catch((e) => live && setError(e?.response?.status === 404 ? "This library isn't available. Check the link, or ask the publisher for a new one." : "The library couldn't be reached. Please check your connection and try again."));
     return () => { live = false; clearTimeout(slow); };
   }, [slug]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -1750,7 +1941,9 @@ export default function Library({ embed = false }) {
   };
 
   const onFocus = (it) => { clearTimeout(focusTimer.current); focusTimer.current = setTimeout(() => setFocus(it), 90); };
+  const isLocked = (it) => !!(lib?.archive_gate && it && it.flipbook_id !== lib.public_fid && !reader);
   const openIssue = (it, page = 0, terms = null) => {
+    if (isLocked(it)) { setGate({ it, page, terms }); if (spot) setSpot(null); setSearchSheet(false); return; }
     setSharedH(null);
     setHl(Array.isArray(terms) && terms.length ? { fid: it.flipbook_id, page, terms, at: Date.now() } : null);
     if (it.shelf && it.shelf !== curShelf) setShelf(it.shelf);
@@ -1764,6 +1957,7 @@ export default function Library({ embed = false }) {
      cover lifts out and grows to where the open book will sit. The reader mounts under
      it, and the cover only fades once the real page has painted in the same spot. */
   const fly = (it, el, page = 0) => {
+    if (isLocked(it)) return openIssue(it, page);
     if (!el || reduceMotion()) return openIssue(it, page);
     prefetch(it);
     const r = el.getBoundingClientRect();
@@ -1872,7 +2066,7 @@ export default function Library({ embed = false }) {
       </header>
 
       {/* body */}
-      <div className={`relative z-10 flex-1 min-h-0 flex ${askOpen ? "xl:pr-6" : ""} transition-[padding] duration-500`}>
+      <div className={`relative z-10 flex-1 min-h-0 flex ${askOpen ? "xl:pr-6" : ""} ${listen ? "pb-[68px]" : ""} transition-[padding] duration-500`}>
         <div className="flex-1 min-w-0 min-h-0 grid">
           {items.length === 0 ? (
             <main className="min-h-0 grid place-items-center px-6 text-center" data-testid="library-empty">
@@ -1923,8 +2117,9 @@ export default function Library({ embed = false }) {
                   {upcoming(featured).length > 0 && <div className="mt-6 max-w-lg"><DatesToAct lib={lib} item={featured} slug={slug} max={3} /></div>}
                   <div className="mt-8 flex items-center gap-4">
                     <button onClick={() => fly(featured, hero.target.current)} className="h-12 px-7 rounded-full bg-white text-[color:var(--ink)] text-[15px] font-medium hover:bg-[color:var(--paper)] active:scale-[0.98] transition" data-testid="library-read">{curShelf === "articles" ? "Read article" : curShelf === "presentations" ? "Open" : featured?.special ? "Read edition" : `Read ${monthOf(featured)}`}</button>
+                    {featured?.audio && <button onClick={() => (isLocked(featured) ? setGate({ it: featured, page: 0, then: () => setListen({ it: featured, autoplay: true }) }) : setListen({ it: featured, autoplay: true }))} className="h-12 pl-4 pr-5 rounded-full lib-glass flex items-center gap-2 hover:bg-white/15 transition-colors text-[14.5px]" data-testid="hero-listen"><Headphones className="w-[18px] h-[18px]" />Listen<span className="lib-cond text-[12.5px] text-white/55">{Math.max(1, Math.round(featured.audio.duration / 60))} min</span></button>}
                     <button onClick={() => setShareOf({ item: featured, page: 0 })} className="h-12 w-12 rounded-full lib-glass grid place-items-center hover:bg-white/15 transition-colors" aria-label={`Share ${issueName(featured)}`} title="Share" data-testid="hero-share"><Share2 className="w-[18px] h-[18px]" /></button>
-                    <span className="lib-cond text-[13px] text-white/50">{featured?.page_count} pages</span>
+                    <span className="lib-cond text-[13px] text-white/50">{featured?.page_count} pages{isLocked(featured) ? ", free with your email" : ""}</span>
                   </div>
                 </div>
                 <div className="lib-tilt order-1 md:order-2 justify-self-center md:justify-self-end lib-enter">
@@ -1956,7 +2151,7 @@ export default function Library({ embed = false }) {
                               style={{ marginLeft: i === 0 ? 0 : expanded ? 26 : -126, zIndex: expanded ? 1 : row.list.length - i,
                                 transform: expanded ? "none" : `translateY(${Math.min(i, 6) * 2.5}px) rotate(${Math.min(i, 6) * 1.4}deg) scale(${1 - Math.min(i, 6) * 0.012})`,
                                 opacity: expanded || i < 7 ? 1 : 0, transitionDelay: expanded ? `${Math.min(i, 12) * 24}ms` : `${Math.max(0, 6 - i) * 12}ms` }}>
-                              <ShelfCard item={it} stacked={!expanded} focused={featured?.flipbook_id === it.flipbook_id} onFocus={onFocus} onOpen={(x, el) => fly(x, el)} />
+                              <ShelfCard item={it} locked={isLocked(it)} stacked={!expanded} focused={featured?.flipbook_id === it.flipbook_id} onFocus={onFocus} onOpen={(x, el) => fly(x, el)} />
                             </div>
                           ))}
                         </div>
@@ -1995,7 +2190,7 @@ export default function Library({ embed = false }) {
               <div className="hidden md:block min-h-0 border-r border-white/[0.06]"><DockRail items={items} current={open.flipbook_id} onOpen={openIssue} switcher={switcher("down", "")} /></div>
               <Reader slug={slug} item={open} items={items} startPage={startPage} embed={embed} onOpen={openIssue} onBack={back} onPage={setReadPage}
                 onShown={land} onSubscribe={() => setSubOpen("subscribe")} subscribed={subscribed} onShare={(it, p, head) => setShareOf({ item: it, page: p, head: head || null })}
-                lib={lib} channel={channel} highlight={hl && hl.fid === open.flipbook_id ? hl : null} sharedHead={sharedH != null && open ? flatHeads(open)[sharedH] || null : null}
+                lib={lib} channel={channel} onListen={(it) => setListen({ it, autoplay: true })} reader={reader} onNeedReader={(then) => setGate({ it: open, page: readPage || 0, then })} highlight={hl && hl.fid === open.flipbook_id ? hl : null} sharedHead={sharedH != null && open ? flatHeads(open)[sharedH] || null : null}
                 onClearShared={() => { setSharedH(null); setParams((p) => { p.delete("h"); p.delete("via"); return p; }, { replace: true }); }} />
             </main>
           )}
@@ -2021,6 +2216,13 @@ export default function Library({ embed = false }) {
         </div>
       )}
 
+      {listen && <AudioBar key={listen.it.flipbook_id} item={listen.it} autoplay={listen.autoplay} onClose={() => setListen(null)}
+        onChapter={(p) => { if (open?.flipbook_id === listen.it.flipbook_id) { setStartPage(p); } else openIssue(listen.it, p); }} />}
+      {gate && <GateDialog slug={slug} lib={lib} item={gate.it} onClose={() => setGate(null)} onDone={(r, news) => {
+        setReaderToken(r.token); setReader(r); if (news) setSubscribed(true);
+        const g = gate; setGate(null);
+        if (g.then) g.then(r); else setTimeout(() => { setSharedH(null); setOpen(g.it); setStartPage(g.page || 0); setReadPage(g.page || 0); if (g.it.shelf && g.it.shelf !== curShelf) setShelf(g.it.shelf); if (isWide()) setAskOpen(true); setParams((p) => { p.set("issue", g.it.flipbook_id); if (g.page) p.set("page", String(g.page + 1)); else p.delete("page"); return p; }, { replace: true }); }, 0);
+      }} />}
       {subOpen && <SubscribeDialog slug={slug} lib={lib} topics={topics} issue={open} credentials={subOpen === "credentials"} onClose={() => setSubOpen(false)} onDone={() => setSubscribed(true)} />}
       <InstallPrompt slug={slug} lib={lib} embed={embed} />
       {shareOf && <ShareSheet slug={slug} lib={lib} item={shareOf.item} page={shareOf.page} head={shareOf.head} onClose={() => setShareOf(null)} />}

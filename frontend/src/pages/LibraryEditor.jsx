@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, CalendarPlus, Code2, ExternalLink, FileUp, Link2, Loader2, Mail, Trash2 } from "lucide-react";
+import { ArrowLeft, CalendarPlus, Code2, ExternalLink, FileUp, Headphones, Link2, Loader2, Mail, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Switch } from "../components/ui/switch";
 import { api, copyText, errMsg, fileUrl } from "../lib/api";
 import { LibraryStats, Questions, Subscribers } from "../components/LibraryInsights";
-import { DatesDialog, EmailDialog, datesLabel } from "../components/IssueTools";
+import { AudioDialog, DatesDialog, EmailDialog, datesLabel } from "../components/IssueTools";
 
 const Field = ({ label, children }) => (
   <label className="block space-y-1.5">
@@ -50,13 +50,14 @@ export default function LibraryEditor() {
   const [queue, setQueue] = useState([]);
   const [datesFor, setDatesFor] = useState(null);
   const [emailFor, setEmailFor] = useState(null);
+  const [audioFor, setAudioFor] = useState(null);
   const [upShelf, setUpShelf] = useState("");
   const [view, setView] = useState("all");
   const fileRef = useRef(null);
 
   const apply = (data, keepEdits = false) => {
     setLib(data);
-    if (!keepEdits) { setForm({ title: data.title, subtitle: data.subtitle, pitch_title: data.pitch_title || "", pitch_text: data.pitch_text || "", offer_credentials: !!data.offer_credentials }); setItems(data.items); setDirty(false); }
+    if (!keepEdits) { setForm({ title: data.title, subtitle: data.subtitle, pitch_title: data.pitch_title || "", pitch_text: data.pitch_text || "", offer_credentials: !!data.offer_credentials, archive_gate: data.archive_gate !== false }); setItems(data.items); setDirty(false); }
     else setItems((cur) => data.items.map((i) => cur.find((c) => c.flipbook_id === i.flipbook_id) ? { ...i, ...pick(cur.find((c) => c.flipbook_id === i.flipbook_id)) } : i));
   };
   const pick = (i) => ({ label: i.label, date: i.date, special: i.special, kind: i.kind, shelf: i.shelf || "", deadlines: i.deadlines || [] });
@@ -141,6 +142,7 @@ export default function LibraryEditor() {
             </div>
             <Field label="Headline"><Input value={form.pitch_title} maxLength={80} onChange={(e) => { setForm({ ...form, pitch_title: e.target.value }); setDirty(true); }} placeholder="e.g. Know Early. Act Wisely." data-testid="pitch-title-input" /></Field>
             <Field label="Supporting line"><textarea value={form.pitch_text} maxLength={400} rows={2} onChange={(e) => { setForm({ ...form, pitch_text: e.target.value }); setDirty(true); }} placeholder="What readers get out of each issue" className="w-full rounded-md bg-transparent border border-input px-3 py-2 text-sm" /></Field>
+            <label className="flex items-center gap-3 text-sm"><Switch checked={form.archive_gate} onCheckedChange={(v) => { setForm({ ...form, archive_gate: v }); setDirty(true); }} data-testid="archive-gate-switch" />Only the latest issue is open to all; readers give their name and email once to open older issues (they appear under Subscribers)</label>
             <label className="flex items-center gap-3 text-sm"><Switch checked={form.offer_credentials} onCheckedChange={(v) => { setForm({ ...form, offer_credentials: v }); setDirty(true); }} />Let readers request your firm's credentials (requests arrive as subscribers)</label>
           </section>
 
@@ -207,6 +209,7 @@ export default function LibraryEditor() {
                       <div className="sm:col-span-2 flex flex-wrap gap-2">
                         <Button variant="secondary" size="sm" onClick={() => setDatesFor(it)} data-testid={`dates-${it.flipbook_id}`}><CalendarPlus className="w-4 h-4 mr-1.5" />{datesLabel(it.deadlines)}</Button>
                         <Button variant="secondary" size="sm" disabled={dirty} title={dirty ? "Save changes first" : ""} onClick={() => setEmailFor(it)} data-testid={`email-${it.flipbook_id}`}><Mail className="w-4 h-4 mr-1.5" />Email to subscribers</Button>
+                        <Button variant="secondary" size="sm" onClick={() => setAudioFor(it)} data-testid={`audio-${it.flipbook_id}`}><Headphones className="w-4 h-4 mr-1.5" />{it.audio ? "Audio ready" : "Audio briefing"}</Button>
                       </div>
                     )}
                   </div>
@@ -253,6 +256,7 @@ export default function LibraryEditor() {
       </main>
       {datesFor && <DatesDialog libraryId={id} item={datesFor} onClose={() => setDatesFor(null)} onChange={(ds) => setItem(datesFor.flipbook_id, { deadlines: ds })} />}
       {emailFor && <EmailDialog libraryId={id} item={emailFor} onClose={() => setEmailFor(null)} />}
+      {audioFor && <AudioDialog libraryId={id} item={audioFor} onClose={() => { setAudioFor(null); load(true); }} />}
     </div>
   );
 }

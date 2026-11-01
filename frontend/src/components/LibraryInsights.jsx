@@ -149,8 +149,8 @@ export function Subscribers({ id, title }) {
     try { await api.delete(`/libraries/${id}/subscribers/${sid}`); setList((l) => l.filter((x) => x.id !== sid)); } catch (e) { toast.error(errMsg(e)); }
   };
   const exportCsv = () => {
-    const cols = ["name", "email", "organisation", "phone", "interests", "wants_credentials", "source", "newsletter", "message", "transcript", "status", "created_at"];
-    const flat = (v) => (Array.isArray(v) ? v.map((t) => (t && typeof t === "object" ? `Q: ${t.q} A: ${t.a}` : t)).join("; ") : v ?? "");
+    const cols = ["name", "email", "organisation", "phone", "interests", "wants_credentials", "source", "newsletter", "reads", "message", "transcript", "status", "created_at"];
+    const flat = (v) => (Array.isArray(v) ? v.map((t) => (t && typeof t === "object" ? (t.q ? `Q: ${t.q} A: ${t.a}` : `${t.label} (${t.opens || 0} opens${t.downloads ? `, ${t.downloads} downloads` : ""})`) : t)).join("; ") : v ?? "");
     const esc = (v) => `"${String(flat(v)).replace(/"/g, '""')}"`;
     const csv = [cols.join(","), ...list.map((x) => cols.map((c) => esc(x[c])).join(","))].join("\n");
     const a = document.createElement("a");
@@ -164,7 +164,7 @@ export function Subscribers({ id, title }) {
   return (
     <div className="space-y-3" data-testid="library-subscribers">
       <div className="flex items-center justify-between gap-3">
-        <p className="text-sm text-slate-400">People who subscribed, and readers who asked for a conversation from an Ask answer.</p>
+        <p className="text-sm text-slate-400">People who subscribed, readers who gave their email to open older issues (with what they read), and readers who asked for a conversation.</p>
         <Button variant="secondary" size="sm" onClick={exportCsv} disabled={!list.length}><Download className="w-4 h-4 mr-2" />Export CSV</Button>
       </div>
       {list.length === 0 ? <p className="text-sm text-slate-500 rounded-xl border border-dashed border-white/10 p-6 text-center">No subscribers yet. They'll appear here as soon as someone subscribes.</p> : (
@@ -174,6 +174,12 @@ export function Subscribers({ id, title }) {
               <div className="flex-1 min-w-[200px]">
                 <div className="font-medium">{x.name}<span className="text-slate-400 font-normal">{x.organisation && `, ${x.organisation}`}</span></div>
                 <div className="text-sm text-slate-300"><a href={`mailto:${x.email}`} className="hover:underline">{x.email}</a>{x.phone && <span className="text-slate-400">  ·  {x.phone}</span>}</div>
+                {(x.reader || x.source === "archive") && <div className="inline-block mt-1 mr-1 text-[11px] font-medium rounded-full bg-emerald-400/15 text-emerald-300 px-2 py-0.5">Archive reader</div>}
+                {x.reads?.length > 0 && (
+                  <div className="text-xs text-slate-400 mt-1" data-testid={`reads-${x.id}`}>
+                    Read {x.reads.slice(0, 4).map((r) => `${r.label}${r.opens > 1 ? ` (${r.opens}×)` : ""}${r.downloads ? ", downloaded" : ""}`).join(" · ")}{x.reads.length > 4 ? ` and ${x.reads.length - 4} more` : ""}
+                  </div>
+                )}
                 {x.source === "ask" && <div className="inline-block mt-1 mr-1 text-[11px] font-medium rounded-full bg-blue-400/15 text-blue-300 px-2 py-0.5">Asked for a conversation{x.asked_at ? `, ${fmtDate(x.asked_at)}` : ""}</div>}
                 {x.newsletter === false && <div className="inline-block mt-1 mr-1 text-[11px] rounded-full bg-white/5 text-slate-400 px-2 py-0.5">Not on the issue email</div>}
                 {x.wants_credentials && <div className="inline-block mt-1 text-[11px] font-medium rounded-full bg-amber-400/15 text-amber-300 px-2 py-0.5">Requested credentials</div>}

@@ -26,6 +26,7 @@ from readtext import paragraphs
 import bcrypt
 import jwt
 import secrets
+from html import escape as html_escape
 import boto3
 from botocore.config import Config as BotoConfig
 
@@ -133,6 +134,48 @@ async def require_owner(authorization: Optional[str] = Header(None)) -> str:
 def optional_owner(authorization: Optional[str]) -> Optional[str]:
     claims = read_token(authorization)
     return ws_owner(claims["ws"]) if claims else None
+
+
+# ---- archive readers: the latest issue is open to everyone; older ones ask for a name
+# and email once. A reader token (separate from staff sign-in) remembers them.
+READER_DAYS = 365
+
+
+def make_reader_token(sid: str, lid: str) -> str:
+    exp = datetime.now(timezone.utc) + timedelta(days=READER_DAYS)
+    return jwt.encode({"typ": "reader", "sid": sid, "lib": lid, "exp": exp}, JWT_SECRET, algorithm="HS256")
+
+
+def read_reader(token: Optional[str]) -> Optional[dict]:
+    if not token:
+        return None
+    try:
+        c = jwt.decode(token.strip(), JWT_SECRET, algorithms=["HS256"])
+        return c if c.get("typ") == "reader" else None
+    except jwt.PyJWTError:
+        return None
+
+
+def gate_on(lib: dict) -> bool:
+    return lib.get("archive_gate", True) is not False
+
+
+async def public_fid_of(lib: dict) -> Optional[str]:
+    """The newest ready monthly issue: the one anyone can read."""
+    monthly = [i for i in sort_items(lib.get("items", [])) if shelf_of(i) == "monthly"]
+    ready = {b["id"] async for b in db.flipbooks.find({"id": {"$in": [i["flipbook_id"] for i in monthly]}, "status": "ready", "is_deleted": False}, {"_id": 0, "id": 1})}
+    return next((i["flipbook_id"] for i in monthly if i["flipbook_id"] in ready), None)
+
+
+async def gate_for(fid: str, reader: Optional[str]) -> Optional[dict]:
+    """The library that locks this issue for this visitor, or None if they may read it."""
+    lib = await db.libraries.find_one({"items.flipbook_id": fid, "is_deleted": False}, {"_id": 0})
+    if not lib or not gate_on(lib) or fid == await public_fid_of(lib):
+        return None
+    c = read_reader(reader)
+    if c and c.get("lib") == lib["id"]:
+        return None
+    return lib
 
 
 def slugify(text: str) -> str:
@@ -288,6 +331,7 @@ class TrackEvent(BaseModel):
     tz: str = Field("", max_length=64)
     seconds: float = Field(0, ge=0, le=120)
     channel: str = Field("", max_length=20)
+    reader: str = Field("", max_length=600)
 
 
 class LeadIn(BaseModel):
@@ -464,6 +508,66 @@ async def login(body: LoginIn, request: Request):
     return {"token": make_token(user["id"], ws["id"]), **(await account_view(user, ws))}
 
 
+# ---- forgot password: a single-use link, valid 30 minutes, emailed through Brevo
+class ForgotIn(BaseModel):
+    email: str = Field(max_length=200)
+
+
+class ResetIn(BaseModel):
+    token: str = Field(min_length=20, max_length=200)
+    password: str = Field(min_length=8, max_length=128)
+
+
+async def send_email(to: str, subject: str, html: str, text: str, name: str = "") -> bool:
+    if not (BREVO_KEY and EMAIL_FROM):
+        return False
+    import httpx
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post("https://api.brevo.com/v3/smtp/email", headers={"api-key": BREVO_KEY, "accept": "application/json"},
+                              json={"sender": {"email": EMAIL_FROM, "name": EMAIL_FROM_NAME or "FlipCraft"}, "to": [{"email": to, **({"name": name} if name else {})}],
+                                    "subject": subject, "htmlContent": html, "textContent": text})
+    if r.status_code >= 300:
+        logger.warning("Brevo send failed: %s", r.text[:300])
+    return r.status_code < 300
+
+
+@api.post("/auth/forgot")
+async def forgot_password(body: ForgotIn, request: Request):
+    if not (BREVO_KEY and EMAIL_FROM):
+        raise HTTPException(status_code=503, detail="Password reset by email isn't switched on yet. Please contact your administrator.")
+    email = body.email.strip().lower()
+    if await over_limit(f"forgot:{client_ip(request)}", 5, 3600) or await over_limit(f"forgot:{email}", 3, 3600):
+        raise HTTPException(status_code=429, detail="Too many requests. Please try again in an hour.")
+    user = await db.users.find_one({"email": email}, {"_id": 0, "id": 1, "name": 1})
+    if user:  # same answer either way, so the form can't be used to discover accounts
+        raw = secrets.token_urlsafe(32)
+        await db.resets.insert_one({"h": hashlib.sha256(raw.encode()).hexdigest(), "user_id": user["id"], "used": False,
+                                    "exp": datetime.now(timezone.utc) + timedelta(minutes=30)})
+        link = f"{FRONTEND_URL}/reset?token={raw}"
+        first = (user.get("name") or "").split(" ")[0]
+        html = f"""<div style="font-family:Roboto,Segoe UI,Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#0a1626">
+<p>Hi{(" " + html_escape(first)) if first else ""},</p><p>Someone asked to reset the password for your FlipCraft account. If it was you, choose a new password here:</p>
+<p style="margin:28px 0"><a href="{link}" style="background:#204262;color:#fff;text-decoration:none;padding:12px 24px;border-radius:999px;display:inline-block">Choose a new password</a></p>
+<p style="color:#44546a;font-size:13px">The link works once and expires in 30 minutes. If you didn't ask for this, ignore this email; your password stays the same.</p></div>"""
+        text = f"Choose a new FlipCraft password: {link}\nThe link works once and expires in 30 minutes. If you didn't ask for this, ignore this email."
+        await send_email(email, "Reset your FlipCraft password", html, text, user.get("name") or "")
+    return {"ok": True}
+
+
+@api.post("/auth/reset")
+async def reset_password(body: ResetIn):
+    h = hashlib.sha256(body.token.encode()).hexdigest()
+    rec = await db.resets.find_one({"h": h, "used": False})
+    exp = rec and rec["exp"]
+    if exp is not None and exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+    if not rec or exp < datetime.now(timezone.utc):
+        raise HTTPException(status_code=400, detail="This reset link has expired or was already used. Please ask for a new one.")
+    await db.resets.update_one({"h": h}, {"$set": {"used": True}})
+    await db.users.update_one({"id": rec["user_id"]}, {"$set": {"password_hash": bcrypt.hashpw(body.password.encode(), bcrypt.gensalt()).decode()}})
+    return {"ok": True}
+
+
 @api.get("/auth/me")
 async def me(authorization: Optional[str] = Header(None)):
     claims = read_token(authorization)
@@ -571,6 +675,18 @@ async def track(fid: str, body: TrackEvent, authorization: Optional[str] = Heade
         await db.visitors.update_one({"flipbook_id": fid, "visitor": body.visitor}, upd)
     if inc:
         await db.stats.update_one({"flipbook_id": fid}, {"$inc": inc}, upsert=True)
+    rd = read_reader(body.reader)
+    if rd and (body.open or body.seconds):
+        upd = {"$set": {"last": now_iso(), "library_id": rd["lib"]}, "$setOnInsert": {"first": now_iso()}}
+        incs = {}
+        if body.open:
+            incs["opens"] = 1
+        if body.seconds:
+            incs["seconds"] = round(body.seconds, 1)
+        if pages:
+            upd["$addToSet"] = {"pages": {"$each": pages}}
+        upd["$inc"] = incs
+        await db.readlog.update_one({"sid": rd["sid"], "flipbook_id": fid}, upd, upsert=True)
     return {"ok": True}
 
 
@@ -623,10 +739,12 @@ async def get_stats(fid: str, ohash: str = Depends(require_owner)):
 
 
 @api.get("/flipbooks/{fid}")
-async def get_flipbook(fid: str, authorization: Optional[str] = Header(None)):
+async def get_flipbook(fid: str, authorization: Optional[str] = Header(None), x_reader: Optional[str] = Header(None)):
     fb = await db.flipbooks.find_one({"id": fid, "is_deleted": False}, {"_id": 0})
     if not fb:
         raise HTTPException(status_code=404, detail="Flipbook not found")
+    if optional_owner(authorization) != fb["owner_hash"] and await gate_for(fid, x_reader):
+        raise HTTPException(status_code=401, detail="archive_gate")
     view = public_view(fb, await get_brand(fb["owner_hash"]))
     view["is_owner"] = optional_owner(authorization) == fb["owner_hash"]
     return view
@@ -756,6 +874,7 @@ class LibraryUpdate(BaseModel):
     pitch_title: Optional[str] = Field(None, max_length=80)
     pitch_text: Optional[str] = Field(None, max_length=400)
     offer_credentials: Optional[bool] = None
+    archive_gate: Optional[bool] = None
 
 
 class AddItem(BaseModel):
@@ -793,6 +912,11 @@ async def library_view(lib: dict, public: bool) -> dict:
                       "cover": (b.get("pages") or [""])[0], "thumb": (b.get("thumbs") or [""])[0],
                       "aspect": (b.get("page_width") or 595) / max(b.get("page_height") or 842, 1),
                       "toc": b.get("toc", []) if public else [], "title": b["title"], "cover_mask": b.get("cover_mask"), "shelf": shelf_of(it)})
+    audio = {a["flipbook_id"]: a async for a in db.audio.find({"library_id": lib["id"], "status": "ready"}, {"_id": 0, "flipbook_id": 1, "path": 1, "duration": 1, "chapters": 1})}
+    for i in items:
+        a = audio.get(i["flipbook_id"])
+        if a:
+            i["audio"] = {"path": a["path"], "duration": a.get("duration", 0), "chapters": a.get("chapters", [])}
     plan = await workspace_plan(lib["owner_hash"])
     brand = await get_brand(lib["owner_hash"])
     return {"id": lib["id"], "slug": lib["slug"], "title": lib["title"], "subtitle": lib.get("subtitle", ""),
@@ -800,6 +924,7 @@ async def library_view(lib: dict, public: bool) -> dict:
             "show_badge": not plan["remove_badge"], "updated_at": lib.get("updated_at", lib["created_at"]),
             "pitch_title": lib.get("pitch_title", ""), "pitch_text": lib.get("pitch_text", ""),
             "offer_credentials": bool(lib.get("offer_credentials")),
+            "archive_gate": gate_on(lib), "public_fid": next((i["flipbook_id"] for i in items if i["shelf"] == "monthly" and i["status"] == "ready"), None),
             "ask_ai": bool(plan.get("ai_search") and ask_mod.key()),
             "shelves": [{"id": k, "name": n, "count": sum(1 for i in items if i["shelf"] == k)} for k, n in SHELVES]}
 
@@ -846,6 +971,8 @@ async def update_library(lid: str, body: LibraryUpdate, ohash: str = Depends(req
             changes[k] = v.strip()
     if body.offer_credentials is not None:
         changes["offer_credentials"] = body.offer_credentials
+    if body.archive_gate is not None:
+        changes["archive_gate"] = body.archive_gate
     if body.items is not None:
         mine = {b["id"] async for b in db.flipbooks.find({"id": {"$in": [i.flipbook_id for i in body.items]}, "owner_hash": ohash}, {"_id": 0, "id": 1})}
         changes["items"] = [i.model_dump() for i in body.items if i.flipbook_id in mine]
@@ -1349,6 +1476,7 @@ async def build_issue_email(lib: dict, fid: str, request: Request):
         "ics_all": f"{base}/api/ics/{slug}/{fid}.ics",
         "logo": f"{base}/api/logo/{slug}/white.png" if view["brand"].get("logo") else "",
         "site": view["brand"].get("website") or "",
+        "listen": f"{FRONTEND_URL}/library/{slug}?issue={fid}&listen=1&via=email",
     }
     return view, item, links
 
@@ -1500,8 +1628,16 @@ async def subscribe(slug: str, body: SubscribeIn, request: Request):
 
 @api.get("/libraries/{lid}/subscribers")
 async def list_subscribers(lid: str, ohash: str = Depends(require_owner)):
-    await owned_library(lid, ohash)
-    return await db.subscribers.find({"library_id": lid}, {"_id": 0}).sort("created_at", -1).to_list(5000)
+    lib = await owned_library(lid, ohash)
+    subs = await db.subscribers.find({"library_id": lid}, {"_id": 0}).sort("created_at", -1).to_list(5000)
+    labels = {i["flipbook_id"]: issue_name(i) for i in lib.get("items", [])}
+    reads: Dict[str, list] = {}
+    async for r in db.readlog.find({"library_id": lid}, {"_id": 0}):
+        reads.setdefault(r["sid"], []).append({"flipbook_id": r["flipbook_id"], "label": labels.get(r["flipbook_id"], "Removed issue"),
+                                               "opens": r.get("opens", 0), "downloads": r.get("downloads", 0), "seconds": round(r.get("seconds", 0)), "last": r.get("last")})
+    for s_ in subs:
+        s_["reads"] = sorted(reads.get(s_["id"], []), key=lambda x: x.get("last") or "", reverse=True)
+    return subs
 
 
 class SubscriberUpdate(BaseModel):
@@ -1671,6 +1807,160 @@ async def related_pages(slug: str, flipbook_id: str, page: int = 1):
     return {"results": out}
 
 
+class ReaderIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    email: str = Field(min_length=5, max_length=200)
+    organisation: str = Field("", max_length=160)
+    newsletter: bool = False
+    website: str = Field("", max_length=200)  # honeypot
+
+
+@api.post("/public/libraries/{slug}/reader")
+async def reader_signin(slug: str, body: ReaderIn, request: Request):
+    lib = await db.libraries.find_one({"slug": slug, "is_deleted": False}, {"_id": 0, "id": 1, "owner_hash": 1})
+    if not lib:
+        raise HTTPException(status_code=404, detail="Library not found")
+    if body.website:
+        raise HTTPException(status_code=400, detail="Please try again")
+    if await over_limit(f"reader:{client_ip(request)}", 10, 3600):
+        raise HTTPException(status_code=429, detail="Too many requests. Please try again later.")
+    email = body.email.strip().lower()
+    if not EMAIL_RE.match(email):
+        raise HTTPException(status_code=400, detail="Please enter a valid email address")
+    prev = await db.subscribers.find_one({"library_id": lib["id"], "email": email}, {"_id": 0})
+    doc = {"name": body.name.strip(), "reader": True, "updated_at": now_iso()}
+    if body.organisation.strip():
+        doc["organisation"] = body.organisation.strip()
+    if body.newsletter:
+        doc["newsletter"] = True
+        if prev and prev.get("status") == "unsubscribed":
+            doc["status"] = "new"
+    insert = {"id": uuid.uuid4().hex[:12], "owner_hash": lib["owner_hash"], "created_at": now_iso(), "source": "archive", "reader_since": now_iso()}
+    if not prev:
+        insert["status"] = "new"
+        if not body.newsletter:
+            insert["newsletter"] = False
+    await db.subscribers.update_one({"library_id": lib["id"], "email": email}, {"$set": doc, "$setOnInsert": insert}, upsert=True)
+    sub = await db.subscribers.find_one({"library_id": lib["id"], "email": email}, {"_id": 0, "id": 1})
+    return {"token": make_reader_token(sub["id"], lib["id"]), "name": doc["name"]}
+
+
+@api.get("/public/libraries/{slug}/pdf/{fid}")
+async def reader_pdf(slug: str, fid: str, t: str = ""):
+    """The original PDF, for readers who have given their email."""
+    lib = await db.libraries.find_one({"slug": slug, "is_deleted": False}, {"_id": 0})
+    if not lib or fid not in {i["flipbook_id"] for i in lib.get("items", [])}:
+        raise HTTPException(status_code=404, detail="Not found")
+    rd = read_reader(t)
+    if not rd or rd.get("lib") != lib["id"]:
+        raise HTTPException(status_code=401, detail="archive_gate")
+    fb = await db.flipbooks.find_one({"id": fid, "is_deleted": False}, {"_id": 0, "pdf_path": 1, "title": 1})
+    if not fb or not fb.get("pdf_path"):
+        raise HTTPException(status_code=404, detail="Not found")
+    local = CACHE_DIR / hashlib.sha1(fb["pdf_path"].encode()).hexdigest()
+    if not local.exists():
+        await asyncio.to_thread(download_to, fb["pdf_path"], local)
+    await db.readlog.update_one({"sid": rd["sid"], "flipbook_id": fid}, {"$inc": {"downloads": 1}, "$set": {"last": now_iso(), "library_id": lib["id"]}, "$setOnInsert": {"first": now_iso()}}, upsert=True)
+    item = next((i for i in lib["items"] if i["flipbook_id"] == fid), {})
+    name = re.sub(r"[^\w .&,()-]+", "", f"{lib['title']} - {issue_name(item) or fb.get('title', 'issue')}").strip()[:120] or "issue"
+    return FileResponse(local, media_type="application/pdf", filename=f"{name}.pdf")
+
+
+# ---------------------------------------------------------------- audio briefings
+class AudioSection(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    page: int = Field(0, ge=0, le=2000)
+    text: str = Field(min_length=1, max_length=4000)
+
+
+class AudioScript(BaseModel):
+    sections: List[AudioSection] = Field(min_length=1, max_length=16)
+
+
+async def audio_doc(lid: str, fid: str) -> dict:
+    return await db.audio.find_one({"library_id": lid, "flipbook_id": fid}, {"_id": 0}) or {"status": "none"}
+
+
+@api.get("/libraries/{lid}/items/{fid}/audio")
+async def audio_get(lid: str, fid: str, ohash: str = Depends(require_owner)):
+    await owned_library(lid, ohash)
+    return await audio_doc(lid, fid)
+
+
+@api.post("/libraries/{lid}/items/{fid}/audio/draft")
+async def audio_draft(lid: str, fid: str, ohash: str = Depends(require_owner)):
+    import audio as audio_mod
+    lib = await owned_library(lid, ohash)
+    item = next((i for i in lib.get("items", []) if i["flipbook_id"] == fid), None)
+    if not item:
+        raise HTTPException(status_code=404, detail="Issue not found")
+    pages = [{**p, "text": clean_page_text(p["text"])} async for p in db.pagetext.find({"flipbook_id": fid}, {"_id": 0}).sort("page", 1)]
+    brand = await get_brand(ohash) or {}
+    firm = brand.get("name") or "the publisher"
+    try:
+        sections = await audio_mod.draft_script(pages, firm=firm, short=firm_short(firm) or firm, title=lib["title"], issue=issue_name(item))
+    except audio_mod.AudioError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    await db.audio.update_one({"library_id": lid, "flipbook_id": fid}, {"$set": {"status": "draft", "script": sections, "updated_at": now_iso(), "error": ""}}, upsert=True)
+    return await audio_doc(lid, fid)
+
+
+@api.put("/libraries/{lid}/items/{fid}/audio/script")
+async def audio_save(lid: str, fid: str, body: AudioScript, ohash: str = Depends(require_owner)):
+    await owned_library(lid, ohash)
+    cur = await audio_doc(lid, fid)
+    if cur.get("status") == "generating":
+        raise HTTPException(status_code=409, detail="The audio is being made from the approved script. Wait for it to finish.")
+    await db.audio.update_one({"library_id": lid, "flipbook_id": fid}, {"$set": {"script": [x.model_dump() for x in body.sections], "updated_at": now_iso(),
+                                                                              **({"status": "draft"} if cur.get("status") in ("none", "draft", "failed") else {"edited_after": True})}}, upsert=True)
+    return await audio_doc(lid, fid)
+
+
+async def audio_job(lid: str, fid: str, ohash: str, sections: list) -> None:
+    import audio as audio_mod
+    try:
+        out = await audio_mod.render(sections)
+        path = await store_file(out["mp3"], "audio/mpeg", "mp3", f"audio/{fid}", ohash)
+        old = (await audio_doc(lid, fid)).get("path")
+        await db.audio.update_one({"library_id": lid, "flipbook_id": fid}, {"$set": {"status": "ready", "path": path, "duration": out["duration"],
+                                                                                  "chapters": out["chapters"], "made_at": now_iso(), "error": "", "edited_after": False}})
+        if old and old != path:
+            try:
+                await asyncio.to_thread(store.delete_object, Bucket=S3_BUCKET, Key=old)
+            except Exception:
+                pass
+            await db.files.update_one({"storage_path": old}, {"$set": {"is_deleted": True}})
+    except Exception as e:
+        logger.warning("Audio for %s failed: %s", fid, e)
+        await db.audio.update_one({"library_id": lid, "flipbook_id": fid}, {"$set": {"status": "failed", "error": str(e)[:300]}})
+
+
+@api.post("/libraries/{lid}/items/{fid}/audio/approve")
+async def audio_approve(lid: str, fid: str, body: AudioScript, ohash: str = Depends(require_owner)):
+    await owned_library(lid, ohash)
+    cur = await audio_doc(lid, fid)
+    if cur.get("status") == "generating":
+        return cur
+    sections = [x.model_dump() for x in body.sections]
+    await db.audio.update_one({"library_id": lid, "flipbook_id": fid}, {"$set": {"status": "generating", "script": sections, "approved_at": now_iso(), "error": ""}}, upsert=True)
+    asyncio.create_task(audio_job(lid, fid, ohash, sections))
+    return await audio_doc(lid, fid)
+
+
+@api.delete("/libraries/{lid}/items/{fid}/audio")
+async def audio_delete(lid: str, fid: str, ohash: str = Depends(require_owner)):
+    await owned_library(lid, ohash)
+    cur = await audio_doc(lid, fid)
+    if cur.get("path"):
+        try:
+            await asyncio.to_thread(store.delete_object, Bucket=S3_BUCKET, Key=cur["path"])
+        except Exception:
+            pass
+        await db.files.update_one({"storage_path": cur["path"]}, {"$set": {"is_deleted": True}})
+    await db.audio.delete_one({"library_id": lid, "flipbook_id": fid})
+    return {"ok": True}
+
+
 # ---------------------------------------------------------------- Ask (AI answers from the pages)
 class AskTurn(BaseModel):
     q: str = Field("", max_length=600)
@@ -1749,11 +2039,13 @@ async def library_questions(lid: str, ohash: str = Depends(require_owner)):
 
 
 @api.get("/public/libraries/{slug}/page")
-async def public_page_data(slug: str, flipbook_id: str, page: int):
+async def public_page_data(slug: str, flipbook_id: str, page: int, x_reader: Optional[str] = Header(None), authorization: Optional[str] = Header(None)):
     """Word boxes (for highlighting search terms) and paragraphs (for Read as text)."""
-    lib = await db.libraries.find_one({"slug": slug, "is_deleted": False}, {"_id": 0, "items": 1})
+    lib = await db.libraries.find_one({"slug": slug, "is_deleted": False}, {"_id": 0, "items": 1, "owner_hash": 1})
     if not lib or flipbook_id not in {i["flipbook_id"] for i in lib.get("items", [])}:
         raise HTTPException(status_code=404, detail="Not found")
+    if optional_owner(authorization) != lib["owner_hash"] and await gate_for(flipbook_id, x_reader):
+        raise HTTPException(status_code=401, detail="archive_gate")
     doc = await db.pagewords.find_one({"flipbook_id": flipbook_id, "page": page}, {"_id": 0, "t": 1, "b": 1, "p": 1})
     if doc:
         return {"words": doc.get("t", []), "boxes": doc.get("b", []), "paras": doc.get("p", [])}
@@ -1913,6 +2205,12 @@ async def startup():
     await db.pagetext.create_index([("flipbook_id", 1), ("page", 1)], unique=True)
     await db.asks.create_index([("library_id", 1), ("created_at", -1)])
     await db.hits.create_index([("k", 1), ("at", 1)])
+    await db.audio.create_index([("library_id", 1), ("flipbook_id", 1)], unique=True)
+    # an audio job cut short by a restart can't resume: let the owner try again
+    await db.audio.update_many({"status": "generating"}, {"$set": {"status": "failed", "error": "The server restarted while making the audio. Please approve again."}})
+    await db.resets.create_index("exp", expireAfterSeconds=86400)
+    await db.readlog.create_index([("sid", 1), ("flipbook_id", 1)], unique=True)
+    await db.readlog.create_index("library_id")
     await db.hits.create_index("at", expireAfterSeconds=90000)
     await db.pagewords.create_index([("flipbook_id", 1), ("page", 1)], unique=True)
     try:

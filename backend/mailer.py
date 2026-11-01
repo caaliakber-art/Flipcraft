@@ -19,6 +19,17 @@ def _fmt(iso: str) -> str:
         return iso
 
 
+def cal_links(d: dict, issue_url: str, ics_url: str) -> list:
+    """Open the reader's calendar with the date filled in; the file is for Apple and others."""
+    from urllib.parse import quote
+    start = date.fromisoformat(d["date"])
+    end = date.fromordinal(start.toordinal() + 1)
+    t, note = quote(d["title"]), quote(f"Details: {issue_url}")
+    return [("Google", f"https://calendar.google.com/calendar/render?action=TEMPLATE&text={t}&dates={start:%Y%m%d}/{end:%Y%m%d}&details={note}"),
+            ("Outlook", f"https://outlook.office.com/calendar/0/deeplink/compose?path=%2Fcalendar%2Faction%2Fcompose&rru=addevent&allday=true&subject={t}&startdt={start.isoformat()}&enddt={end.isoformat()}&body={note}"),
+            ("Apple / other", ics_url)]
+
+
 def compose(*, lib: dict, item: dict, heads: list, links: dict, unsub: str) -> tuple[str, str, str]:
     """links: issue, head(i), ics(i), ics_all, logo, site. Returns (subject, html, text)."""
     e = lambda v: html.escape(str(v or ""), quote=True)
@@ -47,7 +58,9 @@ def compose(*, lib: dict, item: dict, heads: list, links: dict, unsub: str) -> t
         lines = "".join(
             f'<tr><td style="padding:10px 0;border-top:1px solid #e3e9f0;font-family:{FONT};font-size:14px;color:{INK};vertical-align:top;width:118px;font-weight:500">{e(_fmt(d["date"]))}</td>'
             f'<td style="padding:10px 0;border-top:1px solid #e3e9f0;font-family:{FONT};font-size:14px;color:{INK};line-height:1.45">{e(d["title"])}'
-            f'<br><a href="{e(links["ics"](i))}" style="color:{color};font-size:13px;text-decoration:none">Add to calendar</a></td></tr>'
+            f'<br><span style="font-size:13px;color:{SLATE}">Add to: </span>'
+            + " &middot; ".join(f'<a href="{e(u)}" style="color:{color};font-size:13px;text-decoration:none">{n}</a>' for n, u in cal_links(d, links["issue"], links["ics"](i)))
+            + '</td></tr>'
             for i, d in enumerate(deadlines))
         rows.append(
             f'<tr><td style="padding:8px 40px 4px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6f8;border-radius:14px">'
@@ -81,7 +94,7 @@ def compose(*, lib: dict, item: dict, heads: list, links: dict, unsub: str) -> t
 </td></tr>
 {f'<tr><td style="padding:26px 40px 6px;font-family:{FONT};font-size:15px;line-height:1.6;color:{SLATE}">{e(pitch_x)}</td></tr>' if pitch_x else ''}
 {''.join(rows)}
-<tr><td align="center" style="padding:34px 40px 10px">{button(links['issue'], 'Read the full issue')}</td></tr>
+<tr><td align="center" style="padding:34px 40px 10px">{button(links['issue'], 'Read the full issue')}{('&nbsp;&nbsp;' + button(links['listen'], f"Listen in {max(1, round((item.get('audio') or {}).get('duration', 0) / 60))} minutes", solid=False)) if links.get('listen') and item.get('audio') else ''}</td></tr>
 <tr><td align="center" style="padding:0 40px 34px;font-family:{FONT};font-size:13px;color:{SLATE}">Each headline opens the issue at its page.</td></tr>
 <tr><td style="background:#f4f6f8;padding:22px 40px;font-family:{FONT};font-size:12px;line-height:1.6;color:#6b7a8c">
   {e(brand.get('footer') or brand.get('name') or '')}<br>

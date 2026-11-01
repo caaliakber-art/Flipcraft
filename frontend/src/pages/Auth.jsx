@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Checkbox } from "../components/ui/checkbox";
-import { errMsg } from "../lib/api";
+import { api, errMsg } from "../lib/api";
 import { useAuth } from "../lib/auth";
 
 const Field = ({ label, children }) => (
@@ -61,7 +61,54 @@ export function Login() {
       <form onSubmit={submit} className="space-y-4">
         <Field label="Work email"><Input type="email" required autoComplete="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} data-testid="login-email" /></Field>
         <Field label="Password"><Input type="password" required autoComplete="current-password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} data-testid="login-password" /></Field>
+        <div className="-mt-2 text-right"><Link to="/forgot" className="text-sm text-blue-400 hover:underline" data-testid="login-forgot-password-link">Forgot password?</Link></div>
         <Button type="submit" className="w-full" disabled={busy} data-testid="login-submit">{busy && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}Sign in</Button>
+      </form>
+    </Shell>
+  );
+}
+
+export function Forgot() {
+  const [email, setEmail] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [sent, setSent] = useState(false);
+  const submit = async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    try { await api.post("/auth/forgot", { email }); setSent(true); } catch (err) { toast.error(errMsg(err, "Could not send the email")); } finally { setBusy(false); }
+  };
+  return (
+    <Shell title="Reset your password" subtitle="We'll email you a link to choose a new one." footer={<Link to="/login" className="text-blue-400 hover:underline">Back to sign in</Link>}>
+      {sent ? (
+        <p className="text-sm text-slate-300 leading-relaxed" data-testid="forgot-sent">If an account exists for <b>{email}</b>, a reset link is on its way. It works once and expires in 30 minutes. Check your spam folder if it hasn't arrived in a few minutes.</p>
+      ) : (
+        <form onSubmit={submit} className="space-y-4">
+          <Field label="Work email"><Input type="email" required autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} data-testid="forgot-email" /></Field>
+          <Button type="submit" className="w-full" disabled={busy} data-testid="forgot-submit">{busy && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}Email me a reset link</Button>
+        </form>
+      )}
+    </Shell>
+  );
+}
+
+export function Reset() {
+  const nav = useNavigate();
+  const token = new URLSearchParams(window.location.search).get("token") || "";
+  const [pw, setPw] = useState({ a: "", b: "" });
+  const [busy, setBusy] = useState(false);
+  const submit = async (e) => {
+    e.preventDefault();
+    if (pw.a !== pw.b) return toast.error("The two passwords don't match");
+    setBusy(true);
+    try { await api.post("/auth/reset", { token, password: pw.a }); toast.success("Password changed. Please sign in."); nav("/login", { replace: true }); }
+    catch (err) { toast.error(errMsg(err, "Could not change the password")); setBusy(false); }
+  };
+  return (
+    <Shell title="Choose a new password" subtitle="Use at least 8 characters." footer={<Link to="/forgot" className="text-blue-400 hover:underline">Ask for a new link</Link>}>
+      <form onSubmit={submit} className="space-y-4">
+        <Field label="New password"><Input type="password" required minLength={8} autoComplete="new-password" value={pw.a} onChange={(e) => setPw({ ...pw, a: e.target.value })} data-testid="reset-password" /></Field>
+        <Field label="Type it again"><Input type="password" required minLength={8} autoComplete="new-password" value={pw.b} onChange={(e) => setPw({ ...pw, b: e.target.value })} data-testid="reset-password-2" /></Field>
+        <Button type="submit" className="w-full" disabled={busy || !token} data-testid="reset-submit">{busy && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}Save new password</Button>
       </form>
     </Shell>
   );

@@ -28,6 +28,11 @@ api.interceptors.response.use(
 );
 
 export const publicApi = axios.create({ baseURL: API });
+// Archive readers: the token from "read older issues with your email" rides on every public call.
+let readerToken = "";
+export const setReaderToken = (t) => { readerToken = t || ""; };
+export const getReaderToken = () => readerToken;
+publicApi.interceptors.request.use((cfg) => { if (readerToken) cfg.headers = { ...cfg.headers, "X-Reader": readerToken }; return cfg; });
 
 export function visitorId() {
   let v = localStorage.getItem("flipcraft_visitor");
@@ -43,7 +48,7 @@ export function visitorId() {
 export function track(id, body) {
   try {
     const t = getToken();
-    publicApi.post(`/flipbooks/${id}/track`, { visitor: visitorId(), ...body }, { headers: t ? { Authorization: `Bearer ${t}` } : {} }).catch(() => {});
+    publicApi.post(`/flipbooks/${id}/track`, { visitor: visitorId(), reader: readerToken || "", ...body }, { headers: t ? { Authorization: `Bearer ${t}` } : {} }).catch(() => {});
   } catch {
     /* storage blocked in some embeds */
   }
