@@ -57,7 +57,7 @@ export function Login() {
   };
 
   return (
-    <Shell title="Sign in" subtitle="Welcome back to your flipbook studio." footer={<>New to FlipCraft? <Link to="/signup" className="text-blue-400 hover:underline">Create an account</Link></>}>
+    <Shell title="Sign in" subtitle="Welcome back to your flipbook studio." footer={<>New to FlipCraft? <Link to="/signup" className="text-blue-400 hover:underline" data-testid="login-request-access">Request access</Link></>}>
       <form onSubmit={submit} className="space-y-4">
         <Field label="Work email"><Input type="email" required autoComplete="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} data-testid="login-email" /></Field>
         <Field label="Password"><Input type="password" required autoComplete="current-password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} data-testid="login-password" /></Field>
@@ -75,11 +75,13 @@ export function Forgot() {
   const submit = async (e) => {
     e.preventDefault();
     setBusy(true);
-    try { await api.post("/auth/forgot", { email }); setSent(true); } catch (err) { toast.error(errMsg(err, "Could not send the email")); } finally { setBusy(false); }
+    try { await api.post("/auth/forgot", { email }); setSent(true); } catch (err) { if (err?.response?.status === 503) setSent("ask"); else toast.error(errMsg(err, "Could not send the email")); } finally { setBusy(false); }
   };
   return (
     <Shell title="Reset your password" subtitle="We'll email you a link to choose a new one." footer={<Link to="/login" className="text-blue-400 hover:underline">Back to sign in</Link>}>
-      {sent ? (
+      {sent === "ask" ? (
+        <p className="text-sm text-slate-300 leading-relaxed" data-testid="forgot-ask">Ask the person who set up your FlipCraft account to reset your password. They can do it in a few seconds from <b>Team</b> on their dashboard, and you'll choose your own password when you next sign in.</p>
+      ) : sent ? (
         <p className="text-sm text-slate-300 leading-relaxed" data-testid="forgot-sent">If an account exists for <b>{email}</b>, a reset link is on its way. It works once and expires in 30 minutes. Check your spam folder if it hasn't arrived in a few minutes.</p>
       ) : (
         <form onSubmit={submit} className="space-y-4">
@@ -110,6 +112,32 @@ export function Reset() {
         <Field label="Type it again"><Input type="password" required minLength={8} autoComplete="new-password" value={pw.b} onChange={(e) => setPw({ ...pw, b: e.target.value })} data-testid="reset-password-2" /></Field>
         <Button type="submit" className="w-full" disabled={busy || !token} data-testid="reset-submit">{busy && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}Save new password</Button>
       </form>
+    </Shell>
+  );
+}
+
+export function RequestAccess() {
+  const [f, setF] = useState({ name: "", email: "", organisation: "", message: "", website: "" });
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  const submit = async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    try { await api.post("/auth/request-access", f); setDone(true); } catch (err) { toast.error(errMsg(err, "Could not send your request")); } finally { setBusy(false); }
+  };
+  return (
+    <Shell title="Request access" subtitle="FlipCraft is invite-only for now. Tell us about you and we'll be in touch." footer={<>Already have an account? <Link to="/login" className="text-blue-400 hover:underline">Sign in</Link></>}>
+      {done ? <p className="text-sm text-slate-300 leading-relaxed" data-testid="request-done">Thank you. We've received your request and will reply by email.</p> : (
+        <form onSubmit={submit} className="space-y-4">
+          <Field label="Your name"><Input required value={f.name} onChange={set("name")} autoComplete="name" data-testid="request-name" /></Field>
+          <Field label="Work email"><Input type="email" required value={f.email} onChange={set("email")} autoComplete="email" data-testid="request-email" /></Field>
+          <Field label="Organisation"><Input value={f.organisation} onChange={set("organisation")} autoComplete="organization" /></Field>
+          <Field label="What would you like to publish? (optional)"><Input value={f.message} onChange={set("message")} placeholder="e.g. a monthly client newsletter" /></Field>
+          <input value={f.website} onChange={set("website")} tabIndex={-1} autoComplete="off" aria-hidden="true" className="hidden" />
+          <Button type="submit" className="w-full" disabled={busy} data-testid="request-submit">{busy && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}Request access</Button>
+        </form>
+      )}
     </Shell>
   );
 }

@@ -11,6 +11,7 @@ import { BrandDialog } from "../components/BrandDialog";
 import { StatsDialog } from "../components/StatsDialog";
 import { api, errMsg, fileUrl } from "../lib/api";
 import { useAuth } from "../lib/auth";
+import { ChangePassword, Team } from "../components/Team";
 
 const EMPTY_BRAND = { name: "", logo: "", color: "#3B82F6", color2: "#44546A", website: "", font: "Inter", theme: "dark", stripe: "", footer: "" };
 
@@ -138,8 +139,10 @@ export default function Dashboard() {
             </div>
           )}
         </section>
+        <Team account={account} />
       </main>
 
+      {account?.user?.must_change && <ChangePassword open forced onClose={(ok) => ok && window.location.reload()} />}
       <ShareDialog book={share} open={!!share} onOpenChange={(o) => !o && setShare(null)} />
       <StatsDialog book={stats} onOpenChange={(o) => !o && setStats(null)} />
       <BrandDialog open={brandOpen} onOpenChange={setBrandOpen} brand={brand} onSaved={setBrand} />

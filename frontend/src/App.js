@@ -7,7 +7,7 @@ import Editor from "./pages/Editor";
 import Viewer from "./pages/Viewer";
 import Library from "./pages/Library";
 import LibraryEditor from "./pages/LibraryEditor";
-import { Forgot, Login, Reset, Signup } from "./pages/Auth";
+import { Forgot, Login, RequestAccess, Reset } from "./pages/Auth";
 import { Terms, Privacy } from "./pages/Legal";
 import { AuthProvider, useAuth } from "./lib/auth";
 
@@ -39,7 +39,7 @@ function App() {
           <Route path="/" element={<RequireAuth><Dashboard /></RequireAuth>} />
           <Route path="/edit/:id" element={<RequireAuth><Editor /></RequireAuth>} />
           <Route path="/login" element={<Login />} />
-          <Route path="/signup" element={<Signup />} />
+          <Route path="/signup" element={<RequestAccess />} />
           <Route path="/forgot" element={<Forgot />} />
           <Route path="/reset" element={<Reset />} />
           <Route path="/terms" element={<Terms />} />

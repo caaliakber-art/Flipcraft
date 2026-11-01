@@ -104,6 +104,9 @@ PLANS = {
 }
 # Accounts that get the full-feature demo plan on sign-up (comma separated emails)
 DEMO_ACCOUNTS = {e.strip().lower() for e in os.environ.get("DEMO_ACCOUNTS", "").split(",") if e.strip()}
+# Accounts are created by a workspace owner (Team, in the dashboard); strangers can only
+# request access. Set SIGNUP_OPEN=true when FlipCraft opens to other firms.
+SIGNUP_OPEN = os.environ.get("SIGNUP_OPEN", "").strip().lower() in ("1", "true", "yes")
 
 
 def ws_owner(workspace_id: str) -> str:
@@ -204,8 +207,10 @@ class LoginIn(BaseModel):
 
 async def account_view(user: dict, ws: dict) -> dict:
     plan = PLANS.get(ws.get("plan", "free"), PLANS["free"])
+    m = await db.members.find_one({"workspace_id": ws["id"], "user_id": user["id"]}, {"_id": 0, "role": 1})
     return {
-        "user": {"id": user["id"], "name": user["name"], "email": user["email"]},
+        "user": {"id": user["id"], "name": user["name"], "email": user["email"], "role": (m or {}).get("role", "member"),
+                 "is_admin": user["email"] in DEMO_ACCOUNTS, "must_change": bool(user.get("must_change"))},
         "workspace": {"id": ws["id"], "name": ws["name"], "slug": ws["slug"], "plan": ws.get("plan", "free"), "plan_label": plan["label"], "limits": plan},
     }
 
@@ -471,6 +476,8 @@ async def health():
 @api.post("/auth/signup")
 async def signup(body: SignupIn):
     email = body.email.strip().lower()
+    if not SIGNUP_OPEN and email not in DEMO_ACCOUNTS:
+        raise HTTPException(status_code=403, detail="FlipCraft is invite-only for now. Please request access.")
     if await db.users.find_one({"email": email}, {"_id": 1}):
         raise HTTPException(status_code=409, detail="An account with this email already exists. Please sign in.")
     base = slugify(body.workspace)
@@ -581,6 +588,131 @@ async def reset_password(body: ResetIn):
     return {"ok": True}
 
 
+class AccessRequestIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    email: str = Field(max_length=200, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+    organisation: str = Field("", max_length=160)
+    message: str = Field("", max_length=1000)
+    website: str = Field("", max_length=200)  # honeypot
+
+
+@api.post("/auth/request-access")
+async def request_access(body: AccessRequestIn, request: Request):
+    if body.website:
+        return {"ok": True}
+    if await over_limit(f"access:{client_ip(request)}", 5, 3600):
+        raise HTTPException(status_code=429, detail="Too many requests. Please try again later.")
+    await db.access_requests.update_one({"email": body.email.strip().lower()}, {"$set": {
+        "name": body.name.strip(), "organisation": body.organisation.strip(), "message": body.message.strip(), "updated_at": now_iso()},
+        "$setOnInsert": {"id": uuid.uuid4().hex[:12], "created_at": now_iso()}}, upsert=True)
+    return {"ok": True}
+
+
+async def caller(authorization: Optional[str]) -> tuple:
+    claims = read_token(authorization)
+    if not claims:
+        raise HTTPException(status_code=401, detail="Please sign in again")
+    user = await db.users.find_one({"id": claims["uid"]}, {"_id": 0})
+    m = await db.members.find_one({"workspace_id": claims["ws"], "user_id": claims["uid"]}, {"_id": 0})
+    if not user or not m:
+        raise HTTPException(status_code=401, detail="Please sign in again")
+    return user, m
+
+
+def temp_password() -> str:
+    words = ["Ledger", "Audit", "Harbor", "Cedar", "Summit", "Delta", "Orbit", "Maple", "Quartz", "Falcon"]
+    return f"{secrets.choice(words)}-{secrets.randbelow(9000) + 1000}-{secrets.token_hex(2)}"
+
+
+class MemberIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    email: str = Field(max_length=200, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+@api.get("/team")
+async def team_list(authorization: Optional[str] = Header(None)):
+    user, m = await caller(authorization)
+    rows = []
+    async for x in db.members.find({"workspace_id": m["workspace_id"]}, {"_id": 0}):
+        u = await db.users.find_one({"id": x["user_id"]}, {"_id": 0, "id": 1, "name": 1, "email": 1})
+        if u:
+            rows.append({"user_id": u["id"], "name": u["name"], "email": u["email"], "role": x.get("role", "member"), "created_at": x.get("created_at")})
+    return {"members": rows, "can_manage": m.get("role") == "owner"}
+
+
+@api.post("/team")
+async def team_add(body: MemberIn, authorization: Optional[str] = Header(None)):
+    user, m = await caller(authorization)
+    if m.get("role") != "owner":
+        raise HTTPException(status_code=403, detail="Only the workspace owner can add people")
+    email = body.email.strip().lower()
+    if await db.users.find_one({"email": email}, {"_id": 1}):
+        raise HTTPException(status_code=409, detail="This email already has a FlipCraft account")
+    pw = temp_password()
+    uid = uuid.uuid4().hex
+    await db.users.insert_one({"id": uid, "name": body.name.strip(), "email": email, "password_hash": bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode(),
+                               "terms_version": TERMS_VERSION, "created_at": now_iso(), "added_by": user["id"], "must_change": True})
+    await db.members.insert_one({"workspace_id": m["workspace_id"], "user_id": uid, "role": "member", "created_at": now_iso()})
+    return {"user_id": uid, "email": email, "password": pw}
+
+
+@api.post("/team/{uid}/reset")
+async def team_reset(uid: str, authorization: Optional[str] = Header(None)):
+    user, m = await caller(authorization)
+    if m.get("role") != "owner":
+        raise HTTPException(status_code=403, detail="Only the workspace owner can reset passwords")
+    if not await db.members.find_one({"workspace_id": m["workspace_id"], "user_id": uid}, {"_id": 1}):
+        raise HTTPException(status_code=404, detail="Not in your team")
+    pw = temp_password()
+    await db.users.update_one({"id": uid}, {"$set": {"password_hash": bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode(), "must_change": True}})
+    return {"password": pw}
+
+
+@api.delete("/team/{uid}")
+async def team_remove(uid: str, authorization: Optional[str] = Header(None)):
+    user, m = await caller(authorization)
+    if m.get("role") != "owner" or uid == user["id"]:
+        raise HTTPException(status_code=403, detail="Only the owner can remove people, and not themselves")
+    mem = await db.members.find_one({"workspace_id": m["workspace_id"], "user_id": uid}, {"_id": 0})
+    if not mem or mem.get("role") == "owner":
+        raise HTTPException(status_code=404, detail="Not in your team")
+    await db.members.delete_one({"workspace_id": m["workspace_id"], "user_id": uid})
+    if not await db.members.find_one({"user_id": uid}, {"_id": 1}):
+        await db.users.delete_one({"id": uid})
+    return {"ok": True}
+
+
+class PasswordIn(BaseModel):
+    current: str = Field(max_length=128)
+    new: str = Field(min_length=8, max_length=128)
+
+
+@api.post("/auth/password")
+async def change_password(body: PasswordIn, authorization: Optional[str] = Header(None)):
+    user, m = await caller(authorization)
+    if not bcrypt.checkpw(body.current.encode(), user["password_hash"].encode()):
+        raise HTTPException(status_code=400, detail="Your current password is incorrect")
+    await db.users.update_one({"id": user["id"]}, {"$set": {"password_hash": bcrypt.hashpw(body.new.encode(), bcrypt.gensalt()).decode(), "must_change": False}})
+    return {"ok": True}
+
+
+@api.get("/admin/requests")
+async def access_requests(authorization: Optional[str] = Header(None)):
+    user, m = await caller(authorization)
+    if user["email"] not in DEMO_ACCOUNTS:
+        raise HTTPException(status_code=403, detail="Not allowed")
+    return await db.access_requests.find({}, {"_id": 0}).sort("created_at", -1).to_list(500)
+
+
+@api.delete("/admin/requests/{rid}")
+async def access_request_delete(rid: str, authorization: Optional[str] = Header(None)):
+    user, m = await caller(authorization)
+    if user["email"] not in DEMO_ACCOUNTS:
+        raise HTTPException(status_code=403, detail="Not allowed")
+    await db.access_requests.delete_one({"id": rid})
+    return {"ok": True}
+
+
 @api.get("/auth/me")
 async def me(authorization: Optional[str] = Header(None)):
     claims = read_token(authorization)
@@ -618,6 +750,13 @@ async def create_flipbook(background: BackgroundTasks, file: UploadFile = File(.
         raise HTTPException(status_code=413, detail="PDF is larger than 100 MB")
     if not head.startswith(b"%PDF"):
         raise HTTPException(status_code=400, detail="Please upload a valid PDF file")
+    plan = await workspace_plan(ohash)
+    if plan.get("flipbooks") is not None and await db.flipbooks.count_documents({"owner_hash": ohash, "is_deleted": False}) >= plan["flipbooks"]:
+        raise HTTPException(status_code=402, detail=f"Your plan allows {plan['flipbooks']} flipbooks. Remove one, or contact us to upgrade.")
+    if plan.get("storage_mb") is not None:
+        used = sum([f.get("size", 0) async for f in db.files.find({"owner_hash": ohash, "is_deleted": False}, {"_id": 0, "size": 1})])
+        if used + size > plan["storage_mb"] * 1024 * 1024:
+            raise HTTPException(status_code=402, detail=f"Your plan includes {plan['storage_mb']} MB of storage, which this upload would exceed. Contact us to upgrade.")
     fid = uuid.uuid4().hex[:12]
     local = CACHE_DIR / f"src-{fid}.pdf"
     def save():
