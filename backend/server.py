@@ -518,10 +518,23 @@ class ResetIn(BaseModel):
     password: str = Field(min_length=8, max_length=128)
 
 
+def mail_ready() -> bool:
+    return bool(EMAIL_FROM and (BREVO_KEY or os.environ.get("RESEND_API_KEY")))
+
+
 async def send_email(to: str, subject: str, html: str, text: str, name: str = "") -> bool:
-    if not (BREVO_KEY and EMAIL_FROM):
+    """Single emails (password resets). Works with Brevo or Resend, whichever key is set."""
+    if not mail_ready():
         return False
     import httpx
+    resend = os.environ.get("RESEND_API_KEY", "").strip()
+    if resend and not BREVO_KEY:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.post("https://api.resend.com/emails", headers={"Authorization": f"Bearer {resend}"},
+                                  json={"from": f"{EMAIL_FROM_NAME or 'FlipCraft'} <{EMAIL_FROM}>", "to": [to], "subject": subject, "html": html, "text": text})
+        if r.status_code >= 300:
+            logger.warning("Resend send failed: %s", r.text[:300])
+        return r.status_code < 300
     async with httpx.AsyncClient(timeout=20) as client:
         r = await client.post("https://api.brevo.com/v3/smtp/email", headers={"api-key": BREVO_KEY, "accept": "application/json"},
                               json={"sender": {"email": EMAIL_FROM, "name": EMAIL_FROM_NAME or "FlipCraft"}, "to": [{"email": to, **({"name": name} if name else {})}],
@@ -533,7 +546,7 @@ async def send_email(to: str, subject: str, html: str, text: str, name: str = ""
 
 @api.post("/auth/forgot")
 async def forgot_password(body: ForgotIn, request: Request):
-    if not (BREVO_KEY and EMAIL_FROM):
+    if not mail_ready():
         raise HTTPException(status_code=503, detail="Password reset by email isn't switched on yet. Please contact your administrator.")
     email = body.email.strip().lower()
     if await over_limit(f"forgot:{client_ip(request)}", 5, 3600) or await over_limit(f"forgot:{email}", 3, 3600):

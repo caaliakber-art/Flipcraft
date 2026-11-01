@@ -1276,7 +1276,7 @@ function paintHighlights(root, page, data, terms) {
 
 function Magnifier({ wrapRef, flipRef, book, page, portrait, moving, zoom }) {
   const [lens, setLens] = useState(null);
-  const Z = 1.9, H = 150; // a reading band: the page's own width, a few lines tall
+  const Z = 1.55, H = 170; // a reading band showing whole lines, enlarged, a few lines tall
   useEffect(() => {
     const wrap = wrapRef.current;
     if (!wrap) return undefined;
@@ -1294,10 +1294,12 @@ function Magnifier({ wrapRef, flipRef, book, page, portrait, moving, zoom }) {
       }
       if (pg == null) { setLens(null); return; }
       const pw = r.pageWidth, bw = pw * Z;
-      // follow the pointer across the line, but never show past the page's edges
-      const bx = Math.min(bw - pw, Math.max(0, (x - left) * Z - pw / 2));
+      // the band is as wide as the enlarged page, so a full line always fits; centred on
+      // the page and kept inside the reading area
+      const W = wrap.clientWidth;
+      const bandLeft = Math.max(4, Math.min(W - bw - 4, left + pw / 2 - bw / 2));
       const top = Math.min(r.top + r.height - H, Math.max(r.top, y - H / 2));
-      setLens({ left, top, w: pw, pg, bx, by: (y - r.top) * Z - H / 2, bw, bh: r.height * Z });
+      setLens({ left: bandLeft, top, w: bw, pg, bx: 0, by: (y - r.top) * Z - H / 2, bw, bh: r.height * Z });
     };
     const out = () => setLens(null);
     wrap.addEventListener("mousemove", move);
