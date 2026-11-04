@@ -111,12 +111,12 @@ async def speak(text: str, client: httpx.AsyncClient) -> bytes:
     raise AudioError("The voice service is busy or unavailable. " + last[:200])
 
 
-def to_mp3(pcm: bytes) -> bytes:
+def to_mp3(pcm: bytes, rate: int = RATE, channels: int = 1) -> bytes:
     import lameenc
     enc = lameenc.Encoder()
-    enc.set_bit_rate(64)
-    enc.set_in_sample_rate(RATE)
-    enc.set_channels(1)
+    enc.set_bit_rate(64 if channels == 1 else 96)
+    enc.set_in_sample_rate(rate)
+    enc.set_channels(channels)
     enc.set_quality(5)
     return enc.encode(pcm) + enc.flush()
 
@@ -136,3 +136,18 @@ async def render(sections: List[dict]) -> dict:
                 await asyncio.sleep(4)
     mp3 = await asyncio.to_thread(to_mp3, bytes(pcm))
     return {"mp3": mp3, "duration": round(t, 1), "chapters": chapters}
+
+
+def wav_to_mp3(data: bytes) -> tuple:
+    """A WAV export (16-bit PCM) becomes a small MP3; returns (mp3 bytes, seconds)."""
+    import io
+    import wave
+    try:
+        with wave.open(io.BytesIO(data)) as w:
+            ch, width, rate, n = w.getnchannels(), w.getsampwidth(), w.getframerate(), w.getnframes()
+            frames = w.readframes(n)
+    except Exception:
+        raise AudioError("That WAV file couldn't be read. Export it as MP3 or M4A instead.")
+    if width != 2 or ch not in (1, 2):
+        raise AudioError("Export the WAV as 16-bit mono or stereo, or use MP3 or M4A.")
+    return to_mp3(frames, rate, ch), round(n / rate, 1)

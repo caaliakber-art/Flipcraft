@@ -638,7 +638,8 @@ function AudioBar({ item, autoplay, onChapter, onClose }) {
   const [t, setT] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [list, setList] = useState(false);
-  const a = item.audio;
+  const [len, setLen] = useState(0);
+  const a = { ...item.audio, duration: item.audio.duration || len };
   const chapters = a.chapters || [];
   const cur = chapters.reduce((k, c, i) => (t >= c.start ? i : k), 0);
   useEffect(() => { if (autoplay) ref.current?.play().catch(() => {}); }, [autoplay]);
@@ -664,7 +665,7 @@ function AudioBar({ item, autoplay, onChapter, onClose }) {
         </button>
         <span className="lib-cond text-[12px] text-white/50 shrink-0 tabular-nums">{clock(t)} / {clock(a.duration || 0)}</span>
         <button onClick={() => { ref.current?.pause(); onClose(); }} className="w-8 h-8 grid place-items-center rounded-full hover:bg-white/10 shrink-0" aria-label="Close player"><X className="w-4 h-4" /></button>
-        <audio ref={ref} src={fileUrl(a.path)} preload="none" onTimeUpdate={(e) => setT(e.currentTarget.currentTime)} onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} onEnded={() => setPlaying(false)} />
+        <audio ref={ref} src={fileUrl(a.path)} preload="none" onLoadedMetadata={(e) => Number.isFinite(e.currentTarget.duration) && setLen(e.currentTarget.duration)} onTimeUpdate={(e) => setT(e.currentTarget.currentTime)} onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} onEnded={() => setPlaying(false)} />
       </div>
     </div>
   );

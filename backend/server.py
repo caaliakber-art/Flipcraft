@@ -1064,7 +1064,7 @@ async def library_view(lib: dict, public: bool) -> dict:
                       "cover": (b.get("pages") or [""])[0], "thumb": (b.get("thumbs") or [""])[0],
                       "aspect": (b.get("page_width") or 595) / max(b.get("page_height") or 842, 1),
                       "toc": b.get("toc", []) if public else [], "title": b["title"], "cover_mask": b.get("cover_mask"), "shelf": shelf_of(it)})
-    audio = {a["flipbook_id"]: a async for a in db.audio.find({"library_id": lib["id"], "status": "ready"}, {"_id": 0, "flipbook_id": 1, "path": 1, "duration": 1, "chapters": 1})}
+    audio = {a["flipbook_id"]: a async for a in db.audio.find({"library_id": lib["id"], "path": {"$nin": [None, ""]}}, {"_id": 0, "flipbook_id": 1, "path": 1, "duration": 1, "chapters": 1})}
     for i in items:
         a = audio.get(i["flipbook_id"])
         if a:
@@ -2025,6 +2025,9 @@ class AudioSection(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
 
 
+MAX_AUDIO_BYTES = 60 * 1024 * 1024
+
+
 class AudioScript(BaseModel):
     sections: List[AudioSection] = Field(min_length=1, max_length=16)
 
@@ -2075,13 +2078,8 @@ async def audio_job(lid: str, fid: str, ohash: str, sections: list) -> None:
         path = await store_file(out["mp3"], "audio/mpeg", "mp3", f"audio/{fid}", ohash)
         old = (await audio_doc(lid, fid)).get("path")
         await db.audio.update_one({"library_id": lid, "flipbook_id": fid}, {"$set": {"status": "ready", "path": path, "duration": out["duration"],
-                                                                                  "chapters": out["chapters"], "made_at": now_iso(), "error": "", "edited_after": False}})
-        if old and old != path:
-            try:
-                await asyncio.to_thread(store.delete_object, Bucket=S3_BUCKET, Key=old)
-            except Exception:
-                pass
-            await db.files.update_one({"storage_path": old}, {"$set": {"is_deleted": True}})
+                                                                                  "chapters": out["chapters"], "made_at": now_iso(), "error": "", "edited_after": False, "source": "gemini"}})
+        await drop_old_audio(old, path)
     except Exception as e:
         logger.warning("Audio for %s failed: %s", fid, e)
         await db.audio.update_one({"library_id": lid, "flipbook_id": fid}, {"$set": {"status": "failed", "error": str(e)[:300]}})
@@ -2099,17 +2097,91 @@ async def audio_approve(lid: str, fid: str, body: AudioScript, ohash: str = Depe
     return await audio_doc(lid, fid)
 
 
-@api.delete("/libraries/{lid}/items/{fid}/audio")
-async def audio_delete(lid: str, fid: str, ohash: str = Depends(require_owner)):
-    await owned_library(lid, ohash)
-    cur = await audio_doc(lid, fid)
-    if cur.get("path"):
+AUDIO_TYPES = {"mp3": "audio/mpeg", "mpeg": "audio/mpeg", "m4a": "audio/mp4", "mp4": "audio/mp4", "aac": "audio/aac", "wav": "audio/wav", "wave": "audio/wav"}
+
+
+class AudioChapter(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    page: int = Field(0, ge=0, le=2000)
+    start: float = Field(0, ge=0, le=6 * 3600)
+
+
+def clean_chapters(rows: list, duration: float) -> list:
+    out = sorted(({"title": c["title"].strip(), "page": int(c.get("page", 0)), "start": round(float(c["start"]), 2)} for c in rows if str(c.get("title", "")).strip()), key=lambda c: c["start"])
+    if duration:
+        out = [c for c in out if c["start"] < duration]
+    return out[:24]
+
+
+async def drop_old_audio(old: str, new: str) -> None:
+    if old and old != new:
         try:
-            await asyncio.to_thread(store.delete_object, Bucket=S3_BUCKET, Key=cur["path"])
+            await asyncio.to_thread(store.delete_object, Bucket=S3_BUCKET, Key=old)
         except Exception:
             pass
-        await db.files.update_one({"storage_path": cur["path"]}, {"$set": {"is_deleted": True}})
-    await db.audio.delete_one({"library_id": lid, "flipbook_id": fid})
+        await db.files.update_one({"storage_path": old}, {"$set": {"is_deleted": True}})
+
+
+@api.post("/libraries/{lid}/items/{fid}/audio/upload")
+async def audio_upload(lid: str, fid: str, file: UploadFile = File(...), duration: float = Form(0), chapters: str = Form("[]"), ohash: str = Depends(require_owner)):
+    """Your own recording (from a voice app or a microphone) published in place of the AI voice."""
+    import audio as audio_mod
+    lib = await owned_library(lid, ohash)
+    if not any(i["flipbook_id"] == fid for i in lib.get("items", [])):
+        raise HTTPException(status_code=404, detail="Issue not found")
+    cur = await audio_doc(lid, fid)
+    if cur.get("status") == "generating":
+        raise HTTPException(status_code=409, detail="The AI voice is still making audio for this issue. Wait for it to finish, then upload.")
+    ext = (file.filename or "").rsplit(".", 1)[-1].lower()
+    if ext not in AUDIO_TYPES:
+        raise HTTPException(status_code=400, detail="Upload an MP3, M4A, AAC or WAV file.")
+    data = await file.read(MAX_AUDIO_BYTES + 1)
+    if len(data) > MAX_AUDIO_BYTES:
+        raise HTTPException(status_code=413, detail=f"That file is over {MAX_AUDIO_BYTES // (1024 * 1024)} MB. Export it as MP3 at 64 to 128 kbps.")
+    if len(data) < 2000:
+        raise HTTPException(status_code=400, detail="That file looks empty.")
+    ctype = AUDIO_TYPES[ext]
+    if ctype == "audio/wav":
+        try:
+            data, secs = await asyncio.to_thread(audio_mod.wav_to_mp3, data)
+        except audio_mod.AudioError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        ext, ctype, duration = "mp3", "audio/mpeg", secs
+    try:
+        rows = [AudioChapter(**c).model_dump() for c in json.loads(chapters or "[]")]
+    except Exception:
+        rows = []
+    duration = max(0.0, min(float(duration or 0), 6 * 3600))
+    path = await store_file(data, ctype, ext, f"audio/{fid}", ohash, name=file.filename or "")
+    await db.audio.update_one({"library_id": lid, "flipbook_id": fid}, {"$set": {
+        "status": "ready", "source": "upload", "path": path, "duration": round(duration, 1), "chapters": clean_chapters(rows, duration),
+        "made_at": now_iso(), "error": "", "edited_after": False, "file_name": file.filename or ""}}, upsert=True)
+    await drop_old_audio(cur.get("path"), path)
+    return await audio_doc(lid, fid)
+
+
+@api.put("/libraries/{lid}/items/{fid}/audio/chapters")
+async def audio_chapters(lid: str, fid: str, body: List[AudioChapter], ohash: str = Depends(require_owner)):
+    await owned_library(lid, ohash)
+    cur = await audio_doc(lid, fid)
+    if not cur.get("path"):
+        raise HTTPException(status_code=404, detail="There's no audio on this issue yet.")
+    await db.audio.update_one({"library_id": lid, "flipbook_id": fid}, {"$set": {"chapters": clean_chapters([c.model_dump() for c in body], cur.get("duration", 0))}})
+    return await audio_doc(lid, fid)
+
+
+@api.delete("/libraries/{lid}/items/{fid}/audio")
+async def audio_delete(lid: str, fid: str, keep_script: bool = False, ohash: str = Depends(require_owner)):
+    await owned_library(lid, ohash)
+    cur = await audio_doc(lid, fid)
+    if cur.get("status") == "generating":
+        raise HTTPException(status_code=409, detail="The AI voice is still making audio for this issue. Wait for it to finish.")
+    await drop_old_audio(cur.get("path"), "")
+    if keep_script and cur.get("script"):
+        await db.audio.update_one({"library_id": lid, "flipbook_id": fid}, {"$set": {"status": "draft", "path": "", "duration": 0, "chapters": [], "edited_after": False},
+                                                                          "$unset": {"source": "", "file_name": ""}})
+    else:
+        await db.audio.delete_one({"library_id": lid, "flipbook_id": fid})
     return {"ok": True}
 
 

@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { CalendarPlus, Headphones, Loader2, Mail, Plus, Send, Trash2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { CalendarPlus, Copy, Headphones, Loader2, Mail, Mic, Plus, Send, Trash2, Upload } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -117,7 +117,52 @@ export function EmailDialog({ libraryId, item, onClose }) {
 
 export const datesLabel = (ds) => (ds?.length ? `${ds.length} date${ds.length > 1 ? "s" : ""}, next ${fmt(ds[0].date)}` : "Dates");
 
-const mins = (secs) => `${Math.floor(secs / 60)}:${String(Math.round(secs % 60)).padStart(2, "0")}`;
+const mins = (secs) => { const s = Math.round(secs || 0); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
+const parseTime = (v) => { const t = String(v || "").trim(); if (!/^\d+(:\d{1,2}){0,2}$/.test(t)) return null; return t.split(":").map(Number).reduce((n, x) => n * 60 + x, 0); };
+const audioLength = (file) => new Promise((resolve) => {
+  const el = document.createElement("audio"); const url = URL.createObjectURL(file);
+  const done = (d) => { URL.revokeObjectURL(url); resolve(Number.isFinite(d) ? d : 0); };
+  el.preload = "metadata"; el.onloadedmetadata = () => done(el.duration); el.onerror = () => done(0); el.src = url;
+  setTimeout(() => done(0), 8000);
+});
+
+/* Chapters for the player: a title, where it starts and the page it opens. With the AI voice
+   they are set automatically; with your own recording you type the start times. */
+function ChapterEditor({ base, a, sections, onSaved }) {
+  const seed = () => (a.chapters?.length ? a.chapters.map((c) => ({ title: c.title, page: c.page || 0, time: mins(c.start) }))
+    : sections.map((s, i) => ({ title: s.title, page: s.page || 0, time: i === 0 ? "0:00" : "" })));
+  const [rows, setRows] = useState(seed);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { setRows(seed()); }, [a.path]); // eslint-disable-line react-hooks/exhaustive-deps
+  const set = (i, patch) => setRows((l) => l.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  const bad = rows.some((r) => r.title.trim() && r.time.trim() && parseTime(r.time) === null);
+  const save = async () => {
+    setBusy(true);
+    try {
+      const body = rows.filter((r) => r.title.trim() && r.time.trim()).map((r) => ({ title: r.title.trim(), page: Math.max(0, r.page || 0), start: parseTime(r.time) }));
+      onSaved((await api.put(`${base}/chapters`, body)).data); toast.success("Chapters saved");
+    } catch (e) { toast.error(errMsg(e)); }
+    setBusy(false);
+  };
+  return (
+    <div className="rounded-lg border border-white/10 p-3 space-y-2" data-testid="audio-chapters">
+      <p className="text-sm font-medium">Chapters</p>
+      <p className="text-xs text-slate-400">Type where each part starts, as minutes:seconds (for example 1:45). Leave a time blank to skip that chapter. Without chapters, readers get a plain player.</p>
+      {rows.map((r, i) => (
+        <div key={i} className="flex gap-2">
+          <Input value={r.time} onChange={(e) => set(i, { time: e.target.value })} placeholder="m:ss" className={`w-[76px] ${r.time.trim() && parseTime(r.time) === null ? "border-amber-400" : ""}`} aria-label="Start time" />
+          <Input value={r.title} onChange={(e) => set(i, { title: e.target.value })} placeholder="Chapter title" className="flex-1" />
+          <Input type="number" min={1} value={(r.page || 0) + 1} onChange={(e) => set(i, { page: Math.max(0, (parseInt(e.target.value, 10) || 1) - 1) })} className="w-[76px]" aria-label="Page" title="Page this chapter opens" />
+          <Button variant="ghost" size="icon" onClick={() => setRows((l) => l.filter((_, j) => j !== i))} aria-label="Remove chapter"><Trash2 className="w-4 h-4" /></Button>
+        </div>
+      ))}
+      <div className="flex gap-2">
+        <Button variant="secondary" size="sm" onClick={() => setRows((l) => [...l, { title: "", page: 0, time: "" }])}><Plus className="w-4 h-4 mr-1.5" />Add a chapter</Button>
+        <Button size="sm" className="ml-auto" disabled={busy || bad} onClick={save}>{busy && <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />}Save chapters</Button>
+      </div>
+    </div>
+  );
+}
 
 /* Audio briefing: Gemini drafts a spoken script from the issue; nothing is voiced until
    someone here has read, corrected and approved the words. */
@@ -136,24 +181,49 @@ export function AudioDialog({ libraryId, item, onClose }) {
   const run = async (kind, fn) => { setBusy(kind); try { take((await fn()).data); } catch (e) { toast.error(errMsg(e)); } setBusy(""); };
   const words = sections.reduce((n, s) => n + s.text.trim().split(/\s+/).filter(Boolean).length, 0);
   const set = (i, patch) => setSections((l) => l.map((s, j) => (j === i ? { ...s, ...patch } : s)));
+  const fileRef = useRef(null);
+  const copyScript = () => { navigator.clipboard?.writeText(sections.map((x) => x.text.trim()).filter(Boolean).join("\n\n")).then(() => toast.success("Script copied"), () => toast.error("Couldn't copy")); };
+  const upload = async (f) => {
+    if (a?.path && !window.confirm("Replace the audio that's live now with this recording?")) return;
+    setBusy("upload");
+    try {
+      const fd = new FormData();
+      fd.append("file", f); fd.append("duration", String(await audioLength(f))); fd.append("chapters", JSON.stringify(a?.source === "upload" ? (a.chapters || []) : []));
+      take((await api.post(`${base}/upload`, fd, { timeout: 300000 })).data); toast.success("Recording published. Add chapter times below if you like.");
+    } catch (e) { toast.error(errMsg(e)); }
+    setBusy("");
+  };
   const payload = () => ({ sections: sections.filter((s) => s.title.trim() && s.text.trim()).map((s) => ({ title: s.title.trim(), page: Math.max(0, s.page || 0), text: s.text.trim() })) });
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-w-3xl bg-[#0B0F17] border-white/10 text-slate-50 max-h-[92vh] flex flex-col">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2"><Headphones className="w-5 h-5" />Audio briefing: {item.label}</DialogTitle>
-          <DialogDescription className="text-slate-400">A spoken summary of about 6 minutes, with chapters that open the right page. Read and correct the script before approving: the voice reads exactly these words.</DialogDescription>
+          <DialogDescription className="text-slate-400">A spoken summary of about 6 minutes, with chapters that open the right page. Either approve the script for the AI voice (it reads exactly these words) or upload your own recording.</DialogDescription>
         </DialogHeader>
         {!a ? <p className="text-sm text-slate-400 flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" />Loading...</p> : (
           <div className="flex-1 min-h-0 overflow-y-auto space-y-4 pr-1">
-            {a.status === "ready" && a.path && (
+            {a.path && (
               <div className="rounded-lg border border-emerald-400/30 bg-emerald-400/5 p-3 space-y-2" data-testid="audio-ready">
-                <p className="text-sm text-emerald-300">Published with the issue. {mins(a.duration || 0)} long.{a.edited_after ? " The script has changed since; approve again to remake it." : ""}</p>
+                <p className="text-sm text-emerald-300">Live with the issue: {a.source === "upload" ? `your recording${a.file_name ? ` (${a.file_name})` : ""}` : "AI voice"}, {mins(a.duration)} long.{a.status === "ready" && a.edited_after ? " The script has changed since; approve again to remake it with the AI voice, or upload a new recording." : ""}</p>
                 <audio controls src={fileUrl(a.path)} className="w-full" preload="none" />
+                {a.status !== "generating" && <button className="text-xs text-red-300 hover:underline" disabled={!!busy} onClick={() => window.confirm("Take the audio off this issue? The script stays here.") && run("off", () => api.delete(`${base}?keep_script=1`).then(() => api.get(base)))}>Take audio off the issue</button>}
               </div>
             )}
-            {a.status === "generating" && <p className="rounded-lg border border-blue-400/30 bg-blue-400/5 p-3 text-sm text-blue-200 flex items-center gap-2" data-testid="audio-generating"><Loader2 className="w-4 h-4 animate-spin" />Making the audio from the approved script. This takes a few minutes; you can close this window.</p>}
-            {a.status === "failed" && <p className="rounded-lg border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-200">{a.error || "The audio couldn't be made."} You can approve again.</p>}
+            {a.status === "generating" && <p className="rounded-lg border border-blue-400/30 bg-blue-400/5 p-3 text-sm text-blue-200 flex items-center gap-2" data-testid="audio-generating"><Loader2 className="w-4 h-4 animate-spin" />Making the audio from the approved script. This takes a few minutes; you can close this window.{a.path ? " Readers keep hearing the current version until the new one is ready." : ""}</p>}
+            {a.status === "failed" && <p className="rounded-lg border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-200">{a.error || "The audio couldn't be made."} You can approve again.{a.path ? " The earlier version is still live." : ""}</p>}
+            {a.status !== "generating" && (
+              <div className="rounded-lg border border-white/10 p-3 space-y-2" data-testid="audio-own">
+                <p className="text-sm font-medium flex items-center gap-2"><Mic className="w-4 h-4" />Use your own recording</p>
+                <p className="text-xs text-slate-400">Record or generate it in your voice app, export as MP3 or M4A (WAV works too), and upload it here. It replaces whatever is live now. {sections.length ? "Copy the script below to read from." : "Draft a script first if you'd like something to read from."}</p>
+                <div className="flex flex-wrap gap-2">
+                  <Button size="sm" variant="secondary" disabled={!!busy} onClick={() => fileRef.current?.click()} data-testid="audio-upload">{busy === "upload" ? <Loader2 className="w-4 h-4 mr-1.5 animate-spin" /> : <Upload className="w-4 h-4 mr-1.5" />}{busy === "upload" ? "Uploading..." : "Upload recording"}</Button>
+                  {sections.length > 0 && <Button size="sm" variant="ghost" onClick={copyScript}><Copy className="w-4 h-4 mr-1.5" />Copy script</Button>}
+                </div>
+                <input ref={fileRef} type="file" accept=".mp3,.m4a,.aac,.wav,audio/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) upload(f); }} />
+              </div>
+            )}
+            {a.path && a.status !== "generating" && <ChapterEditor base={base} a={a} sections={sections} onSaved={take} />}
             {!sections.length && a.status !== "generating" && (
               <div className="text-center py-8">
                 <p className="text-sm text-slate-400 mb-4">Start with a draft written from this issue. It takes about half a minute.</p>
